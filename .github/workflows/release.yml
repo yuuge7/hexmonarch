@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Check out main with full history and tags
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: main
           fetch-depth: 0
@@ -68,7 +68,7 @@ jobs:
           } > key.properties
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
@@ -100,9 +100,15 @@ jobs:
           apk="${APP_NAME}-${TAG}.apk"
           cp build/app/outputs/flutter-apk/app-release.apk "$apk"
           apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)apksigner"
-          actual="$("$apksigner" verify --print-certs "$apk" | sed -nE 's/^Signer #1 certificate SHA-256 digest: //p')"
+          # The label in front of the digest changes between build-tools releases
+          # ("Signer #1 certificate ..." up to 36, "V2 Signer: certificate ..." from
+          # 37), so only the part they share is matched. An APK signed under several
+          # schemes prints one line per scheme: every one must be the release key.
+          certs="$("$apksigner" verify --print-certs "$apk")"
+          echo "$certs"
+          actual="$(echo "$certs" | sed -nE 's/.*certificate SHA-256 digest: *([0-9a-fA-F]+).*/\1/p' | tr 'A-F' 'a-f' | sort -u | paste -sd, -)"
           if [ "$actual" != "$SIGNING_CERT_SHA256" ]; then
-            echo "::error::APK is signed with $actual, expected $SIGNING_CERT_SHA256. Check the KEYSTORE_* secrets."
+            echo "::error::APK is signed with ${actual:-an unreadable certificate}, expected $SIGNING_CERT_SHA256. Check the KEYSTORE_* secrets."
             exit 1
           fi
           echo "path=$apk" >> "$GITHUB_OUTPUT"
