@@ -1,0 +1,134 @@
+name: Release
+
+# Every push to main becomes a GitHub release named "HexMonarch vX.Y" with a
+# signed APK attached. The version comes from pubspec.yaml; if that version was
+# already released, the minor and the build number are raised first and the
+# bump is committed back to main (see .github/scripts/next-version.sh). A push
+# therefore always creates a new release and never overwrites an old one.
+#
+# Needs four repository secrets (README, "Release signing"):
+#   KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+
+on:
+  push:
+    branches: [main]
+
+# One release at a time: a newer push waits for the running one instead of
+# racing it for the same version number.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the version bump, create the tag and the release
+
+env:
+  APP_NAME: HexMonarch
+  FLUTTER_VERSION: "3.47.0"
+  # SHA-256 of the release signing certificate. A build signed with anything
+  # else could not be installed over an existing install, so it is not shipped.
+  SIGNING_CERT_SHA256: 7f73743e9a724a7b551cffd2a22264449506ffe102679886735134d76bd3ddfd
+
+jobs:
+  release:
+    name: Build, tag and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out main with full history and tags
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Pick the release version
+        id: version
+        run: bash .github/scripts/next-version.sh
+
+      - name: Restore the signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Repository secret $name is not set. See README, section 'Release signing'."
+              exit 1
+            fi
+          done
+          echo "$KEYSTORE_BASE64" | base64 --decode > hexmonarch-release.jks
+          {
+            echo "storeFile=hexmonarch-release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > key.properties
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build the release APK
+        run: flutter build apk --release
+
+      - name: Check the APK signature
+        id: apk
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          apk="${APP_NAME}-${TAG}.apk"
+          cp build/app/outputs/flutter-apk/app-release.apk "$apk"
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)apksigner"
+          actual="$("$apksigner" verify --print-certs "$apk" | sed -nE 's/^Signer #1 certificate SHA-256 digest: //p')"
+          if [ "$actual" != "$SIGNING_CERT_SHA256" ]; then
+            echo "::error::APK is signed with $actual, expected $SIGNING_CERT_SHA256. Check the KEYSTORE_* secrets."
+            exit 1
+          fi
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+
+      - name: Commit the version bump
+        if: steps.version.outputs.bumped == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pubspec.yaml
+          git commit -m "chore: release $TAG ($VERSION) [skip ci]"
+          if ! git push origin HEAD:main; then
+            echo "::error::main moved while this release was building. Nothing was published; the run for the newer push will release it."
+            exit 1
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          APK: ${{ steps.apk.outputs.path }}
+        run: |
+          gh release create "$TAG" "$APK" \
+            --title "$APP_NAME $TAG" \
+            --target "$(git rev-parse HEAD)" \
+            --generate-notes

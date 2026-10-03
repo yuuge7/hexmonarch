@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: cloud backup and device-to-device transfer carry the save, not the map tiles. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="vtiles/" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="vtiles/" />
+    </device-transfer>
+</data-extraction-rules>

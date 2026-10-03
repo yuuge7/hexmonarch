@@ -1,0 +1,139 @@
+-- HexMonarch local schema. Every table lives on-device; there is no server.
+-- Spec tables are kept verbatim; extension columns are marked "ext".
+
+-- Core Hex Data --------------------------------------------------------------
+-- Each row is a turf: a point-anchored territory (Turf Wars style) placed where
+-- the player physically stood. h3_index is the res-11 cell of that point (a
+-- unique spatial key; turfs are >=60 m apart). Genetics come from the res-9
+-- parent block. district_res6 keeps its spec name but holds the macro district
+-- cell at kDistrictRes (res 5 since v3); it is recomputed from the point on load.
+CREATE TABLE hex_nodes (
+    h3_index TEXT NOT NULL PRIMARY KEY,
+    district_res6 TEXT NOT NULL,
+    biome_type TEXT NOT NULL,
+    anomaly_trait TEXT,
+    owner TEXT NOT NULL DEFAULT 'neutral',
+    garrison_level INT NOT NULL DEFAULT 1,
+    structural_integrity REAL NOT NULL DEFAULT 100.0,
+    is_anchor_hub BOOLEAN NOT NULL DEFAULT 0,
+    connected_relay_target TEXT,
+    last_tick_timestamp INT NOT NULL,
+    turf_lat REAL NOT NULL,                     -- ext: exact turf center
+    turf_lng REAL NOT NULL,                     -- ext
+    turf_name TEXT NOT NULL,                    -- ext: auto-named after the nearest station/street
+    is_station BOOLEAN NOT NULL DEFAULT 0,      -- ext: planted at a transit station
+    hub_level INT NOT NULL DEFAULT 0,           -- ext: anchor hub tier (0 = not a hub)
+    captured_at INT                             -- ext: when the player took it
+) AS HexRow;
+
+CREATE INDEX hex_owner_idx ON hex_nodes (owner);
+CREATE INDEX hex_district_idx ON hex_nodes (district_res6);
+
+-- Installed Modules (ARPG Loot) ---------------------------------------------
+CREATE TABLE installed_modules (
+    id TEXT NOT NULL PRIMARY KEY,
+    hex_h3_index TEXT NOT NULL REFERENCES hex_nodes (h3_index) ON DELETE CASCADE,
+    socket_index INT NOT NULL,
+    module_name TEXT NOT NULL,
+    rarity TEXT NOT NULL,
+    stat_cash_mult REAL NOT NULL DEFAULT 0.0,
+    stat_def_mult REAL NOT NULL DEFAULT 0.0,
+    special_perk TEXT,
+    perk_value REAL NOT NULL DEFAULT 0.0,       -- ext: magnitude of special_perk
+    item_level INT NOT NULL DEFAULT 1           -- ext: power band the module rolled in
+) AS InstalledModuleRow;
+
+CREATE INDEX module_hex_idx ON installed_modules (hex_h3_index);
+
+-- ext: loot that has dropped but is not socketed yet
+CREATE TABLE module_stash (
+    id TEXT NOT NULL PRIMARY KEY,
+    module_name TEXT NOT NULL,
+    rarity TEXT NOT NULL,
+    stat_cash_mult REAL NOT NULL DEFAULT 0.0,
+    stat_def_mult REAL NOT NULL DEFAULT 0.0,
+    special_perk TEXT,
+    perk_value REAL NOT NULL DEFAULT 0.0,
+    item_level INT NOT NULL DEFAULT 1,
+    acquired_at INT NOT NULL
+) AS StashRow;
+
+-- RNG Event Director ----------------------------------------------------------
+CREATE TABLE active_world_events (
+    event_id TEXT NOT NULL PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    target_h3_index TEXT NOT NULL,
+    expires_at INT NOT NULL,
+    payload_json TEXT NOT NULL
+) AS WorldEventRow;
+
+-- Player Singleton State --------------------------------------------------------
+CREATE TABLE player_state (
+    id INT NOT NULL PRIMARY KEY CHECK (id = 1),
+    credits REAL NOT NULL DEFAULT 1000.0,
+    materials REAL NOT NULL DEFAULT 250.0,
+    intel REAL NOT NULL DEFAULT 50.0,
+    prestige_keys INT NOT NULL DEFAULT 0,
+    level INT NOT NULL DEFAULT 1,
+    xp INT NOT NULL DEFAULT 0,
+    last_known_lat REAL,
+    last_known_lng REAL,
+    last_sync_timestamp INT NOT NULL,
+    monotonic_uptime INT NOT NULL,
+    world_seed INT NOT NULL,                    -- ext: hidden WorldSeed for hex genetics
+    boot_count INT NOT NULL DEFAULT -1,         -- ext: Settings.Global.BOOT_COUNT at last sync
+    wall_at_sync INT NOT NULL DEFAULT 0,        -- ext: raw device wall clock at last sync
+    tamper_strikes INT NOT NULL DEFAULT 0,      -- ext
+    blueprints INT NOT NULL DEFAULT 0,          -- ext: convoy loot, crafts guaranteed Rare+ modules
+    liquidations INT NOT NULL DEFAULT 0,        -- ext: completed prestige cycles
+    lifetime_credits REAL NOT NULL DEFAULT 0.0, -- ext
+    last_event_day INT NOT NULL DEFAULT -1,     -- ext: day index of last Event Deck roll
+    threat_heat REAL NOT NULL DEFAULT 0.0,      -- ext: AI pressure; spikes when the map is quiet
+    created_at INT NOT NULL,                    -- ext
+    settings_json TEXT NOT NULL DEFAULT '{}',   -- ext: patrol mode, haptics, auto-claim
+    energy REAL NOT NULL DEFAULT 30.0           -- ext (v3): spent on jobs, regenerates
+) AS PlayerRow;
+
+-- ext: rival factions. Names come from the current tier; stats persist.
+CREATE TABLE factions (
+    faction_id TEXT NOT NULL PRIMARY KEY,
+    archetype INT NOT NULL,
+    aggression REAL NOT NULL,
+    nemesis_rank INT NOT NULL DEFAULT 0,
+    wins INT NOT NULL DEFAULT 0,
+    losses INT NOT NULL DEFAULT 0
+) AS FactionRow;
+
+-- ext: Offshore Cryptokey upgrades (infinite ranks)
+CREATE TABLE vault_upgrades (
+    upgrade_id TEXT NOT NULL PRIMARY KEY,
+    rank INT NOT NULL DEFAULT 0
+) AS VaultUpgradeRow;
+
+-- ext (v3): street perks bought with credits + intel (plant range, reach, ...)
+CREATE TABLE street_perks (
+    perk_id TEXT NOT NULL PRIMARY KEY,
+    rank INT NOT NULL DEFAULT 0
+) AS StreetPerkRow;
+
+-- ext (v3): how many times each job has been run (mastery)
+CREATE TABLE job_progress (
+    job_id TEXT NOT NULL PRIMARY KEY,
+    runs INT NOT NULL DEFAULT 0
+) AS JobProgressRow;
+
+-- ext: tactical feed
+CREATE TABLE event_log (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    ts INT NOT NULL,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL
+) AS LogRow;
+
+-- Queries -------------------------------------------------------------------
+persistedHexes: SELECT * FROM hex_nodes WHERE owner <> 'neutral';
+allInstalled: SELECT * FROM installed_modules;
+allStash: SELECT * FROM module_stash ORDER BY acquired_at DESC;
+allEvents: SELECT * FROM active_world_events;
+recentLog(:lim AS INT): SELECT * FROM event_log ORDER BY id DESC LIMIT :lim;
+trimLog: DELETE FROM event_log WHERE id <= (SELECT MAX(id) FROM event_log) - 400;

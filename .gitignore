@@ -1,0 +1,74 @@
+# ---------------------------------------------------------------- secrets
+# Release signing key and its passwords. Never commit these: back them up
+# privately instead (see README, "Release signing").
+key.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.base64.txt
+
+# ---------------------------------------------------------------- docs
+# Only the README and the player manual are published. GUIDE.md has to stay
+# tracked: it is bundled as an app asset (pubspec.yaml) and shown in-game, so
+# the build fails without it. Every other Markdown file (CLAUDE.md, notes)
+# stays local.
+*.md
+!README.md
+!GUIDE.md
+
+# ---------------------------------------------------------------- build output
+*.apk
+*.aab
+*.hexsave
+/build/
+/coverage/
+
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+Thumbs.db
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# Editors and assistants
+*.iml
+*.ipr
+*.iws
+.idea/
+.claude/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Widget Preview related
+.widget_preview/
