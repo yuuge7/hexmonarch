@@ -6,6 +6,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' show LatLng;
 import 'package:vector_map_tiles/vector_map_tiles.dart';
 
+import '../../core/format.dart';
 import '../../core/theme.dart';
 import '../../domain/balance.dart';
 import '../../domain/models.dart';
@@ -253,7 +254,9 @@ class _VisibleTurfs {
     final w = g.world;
     final out = <Turf>[];
     final b = cam.visibleBounds;
-    const padLat = 0.0025, padLng = 0.004;
+    // Wide enough to catch a turf whose reach outline crosses the screen edge.
+    final padLat = math.max(280.0, w.perks.plantRangeM + 30) / 111320;
+    final padLng = padLat / math.max(0.2, math.cos(cam.center.latitude * math.pi / 180));
     for (final t in w.turfs.values) {
       if (t.lat >= b.south - padLat && t.lat <= b.north + padLat && t.lng >= b.west - padLng && t.lng <= b.east + padLng) {
         out.add(t);
@@ -310,6 +313,7 @@ class _TurfPainter extends CustomPainter {
     // Fill and line opacity: the sunlight map needs both heavier.
     double fa(double a) => math.min(1.0, a * k.fill);
     double la(double a) => k.light ? math.min(1.0, a + 0.3) : a;
+    final shown = visible.collect(g, cam, size);
 
     // Hub supply spheres ---------------------------------------------------
     for (final s in ix.hubs.values) {
@@ -325,6 +329,33 @@ class _TurfPainter extends CustomPainter {
           ..strokeWidth = 1.2 + k.stroke
           ..color = k.hub.withValues(alpha: la(0.5)),
       );
+    }
+
+    // Turf reach ------------------------------------------------------------
+    // Open ground inside this outline can be planted from a turf, with no walk
+    // there. One outline around all of them: strokes are drawn per turf, then
+    // everything that falls inside another turf's reach is knocked out.
+    final reachPx = w.perks.plantRangeM / mpp;
+    if (reachPx >= 14) {
+      final centers = [
+        for (final t in shown)
+          if (t.isPlayer) cam.latLngToScreenOffset(LatLng(t.lat, t.lng)),
+      ];
+      if (centers.isNotEmpty) {
+        final edge = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1 + k.stroke
+          ..color = k.mine.withValues(alpha: la(0.42));
+        final inside = Paint()..blendMode = BlendMode.clear;
+        canvas.saveLayer(Offset.zero & size, Paint());
+        for (final c in centers) {
+          canvas.drawCircle(c, reachPx, edge);
+        }
+        for (final c in centers) {
+          canvas.drawCircle(c, reachPx - edge.strokeWidth / 2, inside);
+        }
+        canvas.restore();
+      }
     }
 
     // Locked-down districts ---------------------------------------------------
@@ -368,7 +399,7 @@ class _TurfPainter extends CustomPainter {
     final stationRings = Path();
     final glyphs = <(Offset, Turf)>[];
 
-    for (final t in visible.collect(g, cam, size)) {
+    for (final t in shown) {
       final c = cam.latLngToScreenOffset(LatLng(t.lat, t.lng));
       final r = math.max(3.0, turfRadiusM(t) / mpp);
       final oval = Rect.fromCircle(center: c, radius: r);
@@ -455,6 +486,8 @@ class _TurfPainter extends CustomPainter {
 
     // Center glyphs + labels -----------------------------------------------
     final showNames = zoom >= 15;
+    // Close in, each turf also shows what it mainly supplies per hour.
+    final showYield = zoom >= 16;
     for (final (c, t) in glyphs) {
       final color = t.isPlayer ? (t.isHub ? k.hub : k.mine) : k.hostile;
       final gr = t.isHub ? 6.5 : 4.5;
@@ -470,12 +503,21 @@ class _TurfPainter extends CustomPainter {
       if (t.isHub) canvas.drawCircle(c, 1.8, Paint()..color = color);
       if (t.isPlayer && (showNames || (t.isHub && zoom >= 12.5))) {
         final label = t.isHub ? '${t.name} · H${t.hubLevel}' : t.name;
-        _label(canvas, c + Offset(0, gr + 9), label.toUpperCase(), color, k.ground);
+        final y = showYield ? ix.turfHourly[t.id] : null;
+        _label(canvas, c + Offset(0, gr + 9), label.toUpperCase(), color, k.ground,
+            sub: y == null ? null : _mainYield(t, y, k));
       }
     }
   }
 
-  void _label(Canvas canvas, Offset at, String text, Color c, Color halo) {
+  /// What a turf is there for: the resource its ground type produces.
+  (String, Color) _mainYield(Turf t, Resources y, MapInk k) => switch (t.biome) {
+        Biome.commercial => ('+${fmtNum(y.credits)} CR/H', k.hub),
+        Biome.industrial => ('+${fmtNum(y.materials)} MAT/H', k.ink),
+        Biome.municipal => ('+${fmtNum(y.intel)} INT/H', k.intel),
+      };
+
+  void _label(Canvas canvas, Offset at, String text, Color c, Color halo, {(String, Color)? sub}) {
     final tp = TextPainter(
       text: TextSpan(
         text: text.length > 22 ? '${text.substring(0, 21)}…' : text,
@@ -487,10 +529,14 @@ class _TurfPainter extends CustomPainter {
           color: c,
           shadows: [Shadow(color: halo, blurRadius: 4), Shadow(color: halo, blurRadius: 2)],
         ),
+        children: [
+          if (sub != null) TextSpan(text: '\n${sub.$1}', style: TextStyle(color: sub.$2)),
+        ],
       ),
+      textAlign: TextAlign.center,
       textDirection: TextDirection.ltr,
     )..layout();
-    tp.paint(canvas, at - Offset(tp.width / 2, tp.height / 2));
+    tp.paint(canvas, at - Offset(tp.width / 2, tp.preferredLineHeight / 2));
   }
 
   @override
@@ -611,6 +657,37 @@ class _FxPainter extends CustomPainter {
       );
     }
 
+    // Picked spot for a remote plant, tied to what it reaches out from: the
+    // turf in range, else the player.
+    if (g.hasPick) {
+      final c = cam.latLngToScreenOffset(LatLng(g.pickLat!, g.pickLng!));
+      final color = g.pickBlocker == null ? k.mine : k.hub;
+      final r = math.max(8.0, kTurfBaseRadiusM / mpp);
+      final spot = Path()..addOval(Rect.fromCircle(center: c, radius: r));
+      canvas.drawPath(spot, Paint()..color = color.withValues(alpha: (0.06 + 0.06 * pulse) * k.fill));
+      canvas.drawPath(
+        _dashed(spot, 4, 5, -t * 18),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6 + k.stroke
+          ..color = color,
+      );
+      _ticks(canvas, c, 3, color);
+      final via = g.pickVia;
+      final from = via != null
+          ? cam.latLngToScreenOffset(LatLng(via.lat, via.lng))
+          : (g.lat == null ? null : cam.latLngToScreenOffset(LatLng(g.lat!, g.lng!)));
+      if (from != null) {
+        canvas.drawLine(
+          from,
+          c,
+          Paint()
+            ..strokeWidth = 1 + k.stroke / 2
+            ..color = color.withValues(alpha: k.light ? 0.6 : 0.35),
+        );
+      }
+    }
+
     if (g.lat != null) {
       final p = cam.latLngToScreenOffset(LatLng(g.lat!, g.lng!));
 
@@ -637,31 +714,6 @@ class _FxPainter extends CustomPainter {
           canvas.restore();
         }
         _rangeRing(canvas, p, rangePx, k.mine);
-      }
-
-      // Picked spot for a remote plant.
-      if (g.hasPick) {
-        final q = g.actions.claimQuote(g.pickLat!, g.pickLng!, fromLat: g.lat, fromLng: g.lng);
-        final c = cam.latLngToScreenOffset(LatLng(g.pickLat!, g.pickLng!));
-        final color = q.blocker == null ? k.mine : k.hub;
-        final r = math.max(8.0, kTurfBaseRadiusM / mpp);
-        final spot = Path()..addOval(Rect.fromCircle(center: c, radius: r));
-        canvas.drawPath(spot, Paint()..color = color.withValues(alpha: (0.06 + 0.06 * pulse) * k.fill));
-        canvas.drawPath(
-          _dashed(spot, 4, 5, -t * 18),
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 1.6 + k.stroke
-            ..color = color,
-        );
-        _ticks(canvas, c, 3, color);
-        canvas.drawLine(
-          p,
-          c,
-          Paint()
-            ..strokeWidth = 1 + k.stroke / 2
-            ..color = color.withValues(alpha: k.light ? 0.6 : 0.35),
-        );
       }
 
       // Ghost turf: where a new turf would land if you plant right now.

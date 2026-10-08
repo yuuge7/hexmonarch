@@ -34,14 +34,24 @@ class SyncAnchor {
 }
 
 class TimeVerdict {
-  const TimeVerdict({required this.deltaMs, required this.gameNow, this.tamperReason});
+  const TimeVerdict({required this.deltaMs, required this.gameNow, this.tamperReason, this.skewMs = 0});
 
   final int deltaMs;
   final int gameNow;
   final String? tamperReason;
 
+  /// How far the device clock runs ahead of the time the game trusts
+  /// (negative: behind). Only meaningful when [tampered].
+  final int skewMs;
+
   bool get tampered => tamperReason != null;
+
+  /// The clock was pushed well forward: someone fishing for offline income,
+  /// not a phone tidying up a slow clock.
+  bool get fastForward => tampered && skewMs > kCheatSkewMs;
 }
+
+const kCheatSkewMs = 15 * 60 * 1000;
 
 /// Offline time credited when a save is imported, at most.
 const kImportMaxOfflineMs = 3 * 24 * 60 * 60 * 1000;
@@ -80,7 +90,12 @@ TimeVerdict evaluateClock(SyncAnchor anchor, ClockSample now) {
       final mins = (drift / 60000).round();
       reason = 'Device clock shifted ${mins > 0 ? '+' : ''}$mins min against the hardware timer';
     }
-    return TimeVerdict(deltaMs: mono, gameNow: anchor.gameTime + mono, tamperReason: reason);
+    return TimeVerdict(
+      deltaMs: mono,
+      gameNow: anchor.gameTime + mono,
+      tamperReason: reason,
+      skewMs: reason == null ? 0 : drift,
+    );
   }
 
   // Rebooted: wall clock is all we have.
@@ -91,6 +106,7 @@ TimeVerdict evaluateClock(SyncAnchor anchor, ClockSample now) {
       deltaMs: d,
       gameNow: anchor.gameTime + d,
       tamperReason: 'Device clock disagrees with network time',
+      skewMs: now.wall - now.networkTime!,
     );
   }
   if (wallDelta < -kClockTolerance) {
@@ -98,6 +114,7 @@ TimeVerdict evaluateClock(SyncAnchor anchor, ClockSample now) {
       deltaMs: 0,
       gameNow: anchor.gameTime,
       tamperReason: 'Device clock is behind the last sync',
+      skewMs: wallDelta,
     );
   }
   final d = wallDelta < 0 ? 0 : wallDelta;

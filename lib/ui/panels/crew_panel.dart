@@ -7,10 +7,20 @@ import '../../domain/perks.dart';
 import '../../game/game_controller.dart';
 import '../widgets/common.dart';
 import 'arsenal_panel.dart';
+import 'trade_panel.dart';
 
-enum CrewSection { jobs, perks, modules }
+enum CrewSection {
+  jobs('Jobs'),
+  perks('Perks'),
+  modules('Modules'),
+  trade('Trade');
 
-/// Jobs (energy), street perks (credits + intel) and the module stash.
+  const CrewSection(this.label);
+  final String label;
+}
+
+/// Jobs (energy), street perks (credits + intel), the module stash and the
+/// exchange.
 class CrewPanel extends StatefulWidget {
   const CrewPanel({super.key, required this.game});
   final GameController game;
@@ -32,20 +42,9 @@ class _CrewPanelState extends State<CrewPanel> {
           child: Row(
             children: [
               for (final s in CrewSection.values) ...[
-                if (s != CrewSection.values.first) const SizedBox(width: 8),
+                if (s != CrewSection.values.first) const SizedBox(width: 6),
                 Expanded(
-                  child: CommandButton(
-                    label: switch (s) {
-                      CrewSection.jobs => 'Jobs',
-                      CrewSection.perks => 'Perks',
-                      CrewSection.modules =>
-                        game.world.stash.isEmpty ? 'Modules' : 'Modules ${game.world.stash.length}',
-                    },
-                    height: 36,
-                    filled: s == _section,
-                    tone: s == _section ? Tone.mint : Tone.neutral,
-                    onPressed: () => setState(() => _section = s),
-                  ),
+                  child: SegChip(s.label, on: s == _section, onTap: () => setState(() => _section = s)),
                 ),
               ],
             ],
@@ -56,6 +55,7 @@ class _CrewPanelState extends State<CrewPanel> {
             CrewSection.jobs => _Jobs(game: game),
             CrewSection.perks => _Perks(game: game),
             CrewSection.modules => ArsenalPanel(game: game),
+            CrewSection.trade => TradePanel(game: game),
           },
         ),
       ],

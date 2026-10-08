@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../../core/format.dart';
 import '../../core/theme.dart';
-import '../../domain/balance.dart';
 import '../../domain/loot.dart';
 import '../../game/game_controller.dart';
 import '../widgets/common.dart';
@@ -54,7 +53,7 @@ class ArsenalPanel extends StatelessWidget {
             ),
             const SizedBox(height: 14),
             if (target != null && target.isPlayer) ...[
-              Eyebrow('Socketed in ${target.name} · ${installed.length}/${socketCount(target)}'),
+              Eyebrow('Socketed in ${target.name} · ${installed.length}/${w.socketsOf(target)}'),
               const SizedBox(height: 8),
               if (installed.isEmpty)
                 const Text('Nothing socketed here yet.', style: TextStyles.bodyDim),

@@ -27,12 +27,22 @@ EventView describeEvent(GameController g, WorldEvent e) {
     case EventType.convoy:
       final c = convoyCopy(lvl);
       final bp = e.payload['blueprints'];
-      return EventView(c.title, 'Carries $bp blueprint${bp == 1 ? '' : 's'} + ${fmtNum(e.payload['credits'] as num)} cr. Get within 150 m.',
-          c.action, Palette.amber, Icons.local_shipping_outlined);
+      return EventView(
+          c.title,
+          'Carries $bp blueprint${bp == 1 ? '' : 's'} + ${fmtNum(e.payload['credits'] as num)} cr. '
+          'Get within ${g.actions.eventRangeM(e.type).round()} m, or have a turf within ${g.actions.turfStrikeRangeM.round()} m of it.',
+          c.action,
+          Palette.amber,
+          Icons.local_shipping_outlined);
     case EventType.deadDrop:
       final c = deadDropCopy(lvl);
-      return EventView(c.title, 'Materials, intel${e.payload['module'] == true ? ' and a module' : ''}. Walk to it.',
-          c.action, Palette.ice, Icons.inventory_2_outlined);
+      return EventView(
+          c.title,
+          'Materials, intel${e.payload['module'] == true ? ' and a module' : ''}. '
+          'Walk to it, or have a turf within ${g.actions.turfStrikeRangeM.round()} m of it.',
+          c.action,
+          Palette.ice,
+          Icons.inventory_2_outlined);
     case EventType.surge:
       final b = Biome.fromKey(e.payload['biome'] as String? ?? '');
       return EventView(surgeTitle(b), '${b.label} turfs produce x2.', null, Palette.mint, Icons.trending_up);
@@ -75,6 +85,7 @@ class EventCard extends StatelessWidget {
     final dist = game.actions.eventDistanceM(event, game.lat, game.lng);
     final where = dist == null ? '' : (dist < 20 ? 'HERE' : fmtKm(dist / 1000));
     final q = v.action == null ? null : game.actions.eventQuote(event.id, game.lat, game.lng);
+    final via = game.actions.eventVia(event, game.lat, game.lng);
     final point = _point();
     final locatable = point != null && event.type != EventType.market;
 
@@ -107,6 +118,11 @@ class EventCard extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           Text(v.detail, style: TextStyles.bodyDim),
+          if (via != null) ...[
+            const SizedBox(height: 4),
+            Text('In reach of ${via.name}: grab it from where you are.',
+                style: TextStyles.bodyDim.copyWith(color: Palette.mint)),
+          ],
           if (q != null || locatable) ...[
             const SizedBox(height: 8),
             Row(
@@ -118,6 +134,7 @@ class EventCard extends StatelessWidget {
                       height: 44,
                       tone: v.color == Palette.hostile ? Tone.amber : Tone.mint,
                       cost: q.blocker == null ? q.cost : null,
+                      caption: q.blocker == null ? null : q.note,
                       have: game.player,
                       onPressed: q.allowed
                           ? () => game.run((a, now) => a.resolveEvent(event.id, game.lat, game.lng, now))

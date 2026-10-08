@@ -1,8 +1,11 @@
 package com.hexmonarch.hexmonarch
 
+import android.Manifest
 import android.app.Activity
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
 import android.os.VibrationEffect
@@ -22,18 +25,23 @@ import io.flutter.plugin.common.MethodChannel
  *    predefined effects / HapticFeedbackConstants as fallbacks).
  *  - exportFile / importFile: system file picker (Storage Access Framework) so a
  *    save can be moved to Drive, a cable, or a new phone. No storage permission.
+ *  - scheduleAlerts / cancelAlerts / notify*: local notifications, see AlertScheduler.
+ * Also registers the "hexmonarch/tape" platform view (TapeView).
  */
 class MainActivity : FlutterActivity() {
     private val channelName = "hexmonarch/native"
     private val reqExport = 4201
     private val reqImport = 4202
+    private val reqNotify = 4203
     private val maxImportBytes = 32 * 1024 * 1024
 
     private var pendingResult: MethodChannel.Result? = null
     private var pendingBytes: ByteArray? = null
+    private var pendingNotify: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        flutterEngine.platformViewsController.registry.registerViewFactory("hexmonarch/tape", TapeViewFactory())
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -70,9 +78,61 @@ class MainActivity : FlutterActivity() {
                             launchPicker(intent, reqImport)
                         }
                     }
+                    "scheduleAlerts" -> {
+                        val alerts = call.argument<List<Map<String, Any?>>>("alerts") ?: emptyList()
+                        AlertScheduler.schedule(this, alerts)
+                        result.success(alerts.size)
+                    }
+                    "cancelAlerts" -> {
+                        AlertScheduler.cancelAll(this, dismiss = true)
+                        result.success(null)
+                    }
+                    "notifyAllowed" -> result.success(notificationsAllowed())
+                    "notifyRequest" -> requestNotifications(result)
+                    "notifySettings" -> {
+                        try {
+                            startActivity(
+                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName),
+                            )
+                        } catch (_: Exception) {
+                        }
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        TapeView.live?.pause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        TapeView.live?.resume()
+    }
+
+    private fun notificationsAllowed(): Boolean =
+        getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() == true
+
+    /** Android 13+ asks at runtime; older versions allow notifications unless switched off. */
+    private fun requestNotifications(result: MethodChannel.Result) {
+        if (notificationsAllowed() || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || pendingNotify != null) {
+            result.success(notificationsAllowed())
+            return
+        }
+        pendingNotify = result
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), reqNotify)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != reqNotify) return
+        val result = pendingNotify
+        pendingNotify = null
+        result?.success(grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED)
     }
 
     private fun launchPicker(intent: Intent, code: Int) {

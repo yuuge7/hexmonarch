@@ -12,7 +12,9 @@ import 'widgets/common.dart';
 enum _Sort {
   nearest('Nearest'),
   name('Name'),
-  income('Yield'),
+  income('Credits'),
+  materials('Materials'),
+  intel('Intel'),
   weakest('Weakest');
 
   const _Sort(this.label);
@@ -86,6 +88,12 @@ class _TurfListScreenState extends State<TurfListScreen> {
       case _Sort.income:
         double y(Turf t) => ix.turfHourly[t.id]?.credits ?? 0;
         rows.sort((a, b) => y(b).compareTo(y(a)));
+      case _Sort.materials:
+        double y(Turf t) => ix.turfHourly[t.id]?.materials ?? 0;
+        rows.sort((a, b) => y(b).compareTo(y(a)));
+      case _Sort.intel:
+        double y(Turf t) => ix.turfHourly[t.id]?.intel ?? 0;
+        rows.sort((a, b) => y(b).compareTo(y(a)));
       case _Sort.weakest:
         rows.sort((a, b) => a.integrity.compareTo(b.integrity));
     }
@@ -126,8 +134,10 @@ class _TurfListScreenState extends State<TurfListScreen> {
                         style: TextStyles.dataSmall,
                       ),
                       const SizedBox(height: 4),
+                      YieldLine(ix.hourly, size: 12.5, suffix: '  per hour'),
+                      const SizedBox(height: 4),
                       Text(
-                        '+${fmtNum(ix.hourly.credits)} credits per hour in total. Tap a turf to see it on the map.',
+                        'Each row shows what that turf supplies per hour. Tap one to see it on the map.',
                         style: TextStyles.bodyDim.copyWith(fontSize: 12),
                       ),
                     ],
@@ -297,8 +307,11 @@ class _Row extends StatelessWidget {
     final y = ix.turfHourly[t.id];
     final faction = mine ? null : game.world.factionById(factionIdOf(t.owner));
     final locked = mine && ix.lockedDistricts.contains(t.district);
+    final sieged = mine && game.world.siegeSince(t.id) != null;
     final status = !mine
         ? 'Held by ${faction == null ? 'rivals' : factionName(faction, game.player.level)}'
+        : sieged
+        ? 'Under siege · repair it before the next raid'
         : locked
         ? 'District locked down · income frozen'
         : t.isHub
@@ -347,23 +360,24 @@ class _Row extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyles.dataSmall.copyWith(
-                            color: locked ? Palette.hostile : (mine && !supplied && !t.isHub ? Palette.amber : null),
+                            color: locked || sieged
+                                ? Palette.hostile
+                                : (mine && !supplied && !t.isHub ? Palette.amber : null),
                           ),
                         ),
+                        if (mine) ...[
+                          const SizedBox(height: 4),
+                          YieldLine(y ?? const Resources()),
+                        ],
                         const SizedBox(height: 5),
                         Row(
                           children: [
                             SizedBox(
-                              width: 78,
+                              width: 128,
                               child: Text(
-                                mine ? '+${fmtNum(y?.credits ?? 0)}/h' : 'L${t.garrison}',
-                                style: TextStyles.dataSmall.copyWith(color: Palette.amber, fontWeight: FontWeight.w600),
-                              ),
-                            ),
-                            SizedBox(
-                              width: 60,
-                              child: Text(
-                                mine ? 'G${t.garrison}' : (t.isHub ? 'HUB L${t.hubLevel}' : ''),
+                                '${t.biome.label.split(' ').first} · ${mine ? 'G${t.garrison}' : (t.isHub ? 'hub L${t.hubLevel}' : 'L${t.garrison}')}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                                 style: TextStyles.dataSmall,
                               ),
                             ),

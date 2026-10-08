@@ -19,6 +19,10 @@ class SimReport {
   int raidsRepelled = 0;
   int raidsLost = 0;
   int turfsCaptured = 0;
+
+  /// Turfs a raid would have taken, left standing because the player had not
+  /// seen them hit yet.
+  int lastStands = 0;
   int eventsRolled = 0;
   int levelsGained = 0;
   int modulesFound = 0;
@@ -28,7 +32,7 @@ class SimReport {
 
   bool get eventful =>
       !earned.isZero ||
-      raidsRepelled + raidsLost + turfsCaptured + eventsRolled + levelsGained + modulesFound > 0;
+      raidsRepelled + raidsLost + turfsCaptured + lastStands + eventsRolled + levelsGained + modulesFound > 0;
 
   void headline(String s) {
     if (headlines.length < 40) headlines.add(s);
@@ -90,6 +94,7 @@ Module dropModule(
 /// The player abandons or deletes a turf: it is gone, its modules go back to
 /// the stash.
 void collapseTurf(World w, Turf t, int ts) {
+  w.forgetTurf(t.id);
   final mods = w.installed.remove(t.id);
   if (mods != null && mods.isNotEmpty) {
     for (final m in mods) {
@@ -111,6 +116,7 @@ void collapseTurf(World w, Turf t, int ts) {
 /// A faction takes a player turf. Hub level and modules stay on it, so
 /// retaking it restores the investment.
 void captureTurf(World w, Turf t, Faction f, int ts) {
+  w.liftSiege(t.id);
   t.owner = factionOwner(f.id);
   t.integrity = 60;
   t.lastTick = ts;
@@ -129,9 +135,12 @@ void captureTurf(World w, Turf t, Faction f, int ts) {
 /// exact same code: continuous accrual inside each hour, discrete RNG rolls
 /// (raids, heat, Event Deck) on hour boundaries seeded by (WorldSeed, hour).
 class Simulator {
-  Simulator(this.w);
+  Simulator(this.w, {this.xpCarry = 0});
   final World w;
-  double _xpCarry = 0;
+
+  /// Fraction of passive XP not granted yet. Hand it to a dry run so it
+  /// levels up at the same moment the real one will.
+  double xpCarry;
 
   SimReport run(int from, int to, {required bool offline, SimReport? into}) {
     final r = into ?? SimReport(from, to);
@@ -160,10 +169,10 @@ class Simulator {
     p.lifetimeCredits += gain.credits;
     r.earned = r.earned + gain;
 
-    _xpCarry += ix.passiveXpPerHour * dtH;
-    if (_xpCarry >= 1) {
-      final whole = _xpCarry.floor();
-      _xpCarry -= whole;
+    xpCarry += ix.passiveXpPerHour * dtH;
+    if (xpCarry >= 1) {
+      final whole = xpCarry.floor();
+      xpCarry -= whole;
       grantXp(w, whole, b, r);
     }
 
@@ -189,6 +198,7 @@ class Simulator {
       } else if (repair > 0 && t.integrity < floor) {
         t.integrity = math.min(floor, t.integrity + repair * dtH);
       }
+      if (before < 100 && t.integrity >= 100) w.liftSiege(t.id);
       if (before.floor() != t.integrity.floor()) w.markTurf(t);
     }
 
@@ -238,15 +248,27 @@ class Simulator {
         p.heat = math.max(0, p.heat - 0.4);
         r.raidsLost++;
         final dmg = math.min(100.0, 30 * attack / math.max(1, def));
-        t.integrity -= dmg;
+        final left = t.integrity - dmg;
         w.markTurf(t);
-        if (t.integrity <= 0) {
+        if (left > 0) {
+          t.integrity = left;
+          w.besiege(t, ts);
+          w.log(ts, 'loss', '$name hit ${t.name} · ${left.round()}% integrity left', alert: 'Turf under attack');
+        } else if (w.exposed(t)) {
+          t.integrity = 0;
           captureTurf(w, t, f, ts);
           r.turfsCaptured++;
-          w.log(ts, 'loss', '$name seized ${t.isHub ? 'hub ' : ''}${t.name}');
+          w.log(ts, 'loss', '$name seized ${t.isHub ? 'hub ' : ''}${t.name}', alert: 'Turf lost');
           r.headline('$name seized ${t.name}');
         } else {
-          w.log(ts, 'loss', '$name hit ${t.name} · -${dmg.round()}% integrity');
+          // First blood while the player was not looking: the turf holds.
+          t.integrity = kLastStandIntegrity;
+          w.besiege(t, ts);
+          r.lastStands++;
+          w.log(ts, 'loss',
+              '$name broke into ${t.name} · holding at ${kLastStandIntegrity.round()}%. Repair it before they return.',
+              alert: 'Turf about to fall');
+          r.headline('${t.name} is holding at ${kLastStandIntegrity.round()}%: repair it');
         }
         structural = true;
         if (f.wins >= (f.nemesisRank + 1) * 25) {
@@ -343,6 +365,20 @@ class Simulator {
     final def = (w.index.turfDefense[hub.id] ?? 0) * (fortified ? 2.5 : 1);
     final name = factionName(f, w.player.level);
     final title = offensiveCopy(w.player.level).title;
+    // An offensive the player never saw announced can wreck turfs, not take them.
+    final warned = e.createdAt < w.seenAt;
+    bool falls(Turf t) {
+      if (t.integrity > 0) {
+        w.besiege(t, ts);
+        return false;
+      }
+      if (warned || w.exposed(t)) return true;
+      t.integrity = kLastStandIntegrity;
+      w.besiege(t, ts);
+      r.lastStands++;
+      return false;
+    }
+
     if (attack > def) {
       final ratio = attack / math.max(1, def);
       hub.integrity -= math.min(100, 50 * ratio);
@@ -352,18 +388,19 @@ class Simulator {
         if (n.id == hub.id || !n.isPlayer || !w.turfs.containsKey(n.id)) continue;
         n.integrity -= 40;
         w.markTurf(n);
-        if (n.integrity <= 0) {
+        if (falls(n)) {
           captureTurf(w, n, f, ts);
           r.turfsCaptured++;
         }
       }
-      if (hub.integrity <= 0) {
+      if (falls(hub)) {
         captureTurf(w, hub, f, ts);
         r.turfsCaptured++;
-        w.log(ts, 'loss', '$title: $name overran ${hub.name}');
+        w.log(ts, 'loss', '$title: $name overran ${hub.name}', alert: 'Hub lost');
         r.headline('$name overran ${hub.name}');
       } else {
-        w.log(ts, 'loss', '$title: ${hub.name} held, badly damaged');
+        w.log(ts, 'loss', '$title: ${hub.name} held at ${hub.integrity.round()}% integrity. Repair it.',
+            alert: 'Hub damaged');
         r.headline('$title: ${hub.name} damaged');
       }
       f.wins++;
@@ -372,7 +409,7 @@ class Simulator {
       final m = dropModule(w, rng, ts, minRarity: Rarity.rare, levelBonus: 3);
       r.modulesFound++;
       grantXp(w, 100 + 10 * w.player.level, ts, r);
-      w.log(ts, 'gain', '$title repelled at ${hub.name} · captured ${m.name}');
+      w.log(ts, 'gain', '$title repelled at ${hub.name} · captured ${m.name}', alert: 'Offensive repelled');
       r.headline('$title repelled · ${m.rarity.label} module captured');
     }
     w.factionsDirty = true;
@@ -452,7 +489,8 @@ class EventDirector {
       expiresAt: ts + 7 * kDay,
       payload: {'created': ts, 'district': t.district, 'near': t.name},
     ));
-    w.log(ts, 'event', '${lockdownCopy(w.player.level).title}: the district around ${t.name} is frozen');
+    w.log(ts, 'event', '${lockdownCopy(w.player.level).title}: the district around ${t.name} is frozen',
+        alert: 'District locked down');
     return true;
   }
 
@@ -474,7 +512,8 @@ class EventDirector {
         'credits': reward,
       },
     ));
-    w.log(ts, 'event', '${convoyCopy(w.player.level).title} spotted near ${hub.name} · 4h window');
+    w.log(ts, 'event', '${convoyCopy(w.player.level).title} spotted near ${hub.name} · 4h window',
+        alert: 'Convoy spotted');
     return true;
   }
 
@@ -504,7 +543,8 @@ class EventDirector {
         'module': rng.chance(0.6),
       },
     ));
-    w.log(ts, 'event', '${deadDropCopy(p.level).title} planted within a kilometre of your last position');
+    w.log(ts, 'event', '${deadDropCopy(p.level).title} planted within a kilometre of your last position',
+        alert: 'Dead drop nearby');
     return true;
   }
 
@@ -552,7 +592,7 @@ class EventDirector {
     ));
     final msg = '${offensiveCopy(w.player.level).title}: ${factionName(f, w.player.level)} '
         'massing on ${hub.name} · 10h';
-    w.log(ts, 'loss', msg);
+    w.log(ts, 'loss', msg, alert: 'Offensive incoming');
     r.headline(msg);
     return true;
   }

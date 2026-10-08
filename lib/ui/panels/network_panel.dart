@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../../core/format.dart';
 import '../../core/theme.dart';
 import '../../domain/balance.dart';
+import '../../domain/models.dart';
 import '../../domain/tiers.dart';
 import '../../game/game_controller.dart';
 import '../../platform/location_service.dart';
@@ -71,6 +72,10 @@ class NetworkPanel extends StatelessWidget {
                 ],
               ),
             ),
+            if (ix.owned > 0) ...[
+              const SizedBox(height: 8),
+              _SupplyBreakdown(game: game),
+            ],
             const SizedBox(height: 8),
             CommandButton(
               label: 'All my turfs · ${ix.owned}',
@@ -126,6 +131,15 @@ class NetworkPanel extends StatelessWidget {
               onChanged: (v) => game.setSetting('patrol', v),
             ),
             _AutoClaimPicker(game: game),
+            _Toggle(
+              title: 'Alerts',
+              body: game.notifyOn && !game.notifyAllowed
+                  ? 'Blocked by the system. Switch this on to allow notifications for HexMonarch.'
+                  : 'A notification when a turf is raided, about to fall or lost, when an offensive is announced, '
+                      'and when a convoy, a dead drop or full energy is waiting. Works with the game closed.',
+              value: game.notifyOn && game.notifyAllowed,
+              onChanged: game.setNotifications,
+            ),
             _Toggle(
               title: 'White map',
               body: 'White basemap with dark markings, readable in direct sunlight. Also the sun button on the map.',
@@ -194,6 +208,30 @@ class NetworkPanel extends StatelessWidget {
                   ],
                 ],
               ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: CommandButton(
+                      label: 'Test alert',
+                      height: 40,
+                      filled: false,
+                      tone: Tone.hostile,
+                      onPressed: game.debugArmAlert,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: CommandButton(
+                      label: 'Clock cheat',
+                      height: 40,
+                      filled: false,
+                      tone: Tone.hostile,
+                      onPressed: game.debugClockCheat,
+                    ),
+                  ),
+                ],
+              ),
               if (game.fakeFix) ...[
                 const SizedBox(height: 8),
                 CommandButton(label: 'Return to real GPS', height: 40, filled: false, onPressed: game.releaseFakeFix),
@@ -210,6 +248,51 @@ class NetworkPanel extends StatelessWidget {
           ],
         );
       },
+    );
+  }
+}
+
+/// Which kind of turf brings in what: the empire's output by neighbourhood type.
+class _SupplyBreakdown extends StatelessWidget {
+  const _SupplyBreakdown({required this.game});
+  final GameController game;
+
+  @override
+  Widget build(BuildContext context) {
+    final ix = game.index;
+    final count = <Biome, int>{};
+    final sum = <Biome, Resources>{};
+    for (final t in game.world.playerTurfs) {
+      count[t.biome] = (count[t.biome] ?? 0) + 1;
+      sum[t.biome] = (sum[t.biome] ?? const Resources()) + (ix.turfHourly[t.id] ?? const Resources());
+    }
+    return Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Eyebrow('Who supplies what, per hour'),
+          const SizedBox(height: 8),
+          for (final b in Biome.values)
+            if (count[b] != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${b.label} · ${count[b]} turf${count[b] == 1 ? '' : 's'}',
+                        style: TextStyles.body.copyWith(fontSize: 13)),
+                    const SizedBox(height: 2),
+                    YieldLine(sum[b]!),
+                  ],
+                ),
+              ),
+          Text(
+            'Commercial ground pays credits, Industrial materials, Municipal intel. '
+            'Open a turf, or the turf list, for what each one brings in.',
+            style: TextStyles.bodyDim.copyWith(fontSize: 12),
+          ),
+        ],
+      ),
     );
   }
 }

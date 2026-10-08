@@ -6,6 +6,7 @@ import 'package:hexmonarch/core/format.dart';
 import 'package:hexmonarch/core/rng.dart';
 import 'package:hexmonarch/domain/actions.dart';
 import 'package:hexmonarch/domain/balance.dart';
+import 'package:hexmonarch/domain/forecast.dart';
 import 'package:hexmonarch/domain/genetics.dart';
 import 'package:hexmonarch/domain/jobs.dart';
 import 'package:hexmonarch/domain/loot.dart';
@@ -107,6 +108,13 @@ void main() {
           anchor, const ClockSample(wall: 5000000 + 3 * kDay, elapsed: 200000 + 600000, bootCount: 3));
       expect(v.tampered, isTrue);
       expect(v.deltaMs, 600000);
+      expect(v.fastForward, isTrue, reason: 'the clock was pushed ahead');
+
+      // Five minutes of drift is still an anomaly, but nobody cheats for five minutes.
+      final small = evaluateClock(
+          anchor, const ClockSample(wall: 5000000 + 600000 + 5 * 60000, elapsed: 200000 + 600000, bootCount: 3));
+      expect(small.tampered, isTrue);
+      expect(small.fastForward, isFalse);
     });
 
     test('OS clock correction confirmed by network time is not a strike', () {
@@ -114,6 +122,7 @@ void main() {
       final v = evaluateClock(
           anchor, const ClockSample(wall: wall, elapsed: 200000 + 600000, bootCount: 3, networkTime: wall + 900));
       expect(v.tampered, isFalse);
+      expect(v.fastForward, isFalse);
       expect(v.deltaMs, 600000, reason: 'still only the monotonic delta is credited');
     });
 
@@ -144,6 +153,7 @@ void main() {
     test('after reboot, a clock behind last sync is rejected', () {
       final v = evaluateClock(anchor, const ClockSample(wall: 5000000 - kDay, elapsed: 50000, bootCount: 4));
       expect(v.tampered, isTrue);
+      expect(v.fastForward, isFalse, reason: 'a clock set back earns nothing to begin with');
       expect(v.deltaMs, 0);
     });
 
@@ -153,6 +163,7 @@ void main() {
           const ClockSample(
               wall: 5000000 + 10 * kDay, elapsed: 50000, bootCount: 4, networkTime: 5000000 + 2 * kHour));
       expect(v.tampered, isTrue);
+      expect(v.fastForward, isTrue);
       expect(v.deltaMs, 2 * kHour);
     });
 
@@ -533,21 +544,21 @@ void main() {
       final (lat, lng) = openSpot(w);
       cmd.claim(lat, lng, 0, name: 'Home');
 
+      // ~500 m out is past the default range, from the player and from Home...
+      final (fLat, fLng) = openSpot(w, lat, lng + 0.0045);
+      final farAway = metersBetween(lat, lng, fLat, fLng);
+      expect(farAway, greaterThan(w.perks.plantRangeM + Commands.kPlantSlackM));
+      final blocked = cmd.claimQuote(fLat, fLng, fromLat: lat, fromLng: lng);
+      expect(blocked.blocker, 'Out of plant range');
+      expect(blocked.note, contains('Long Arm'), reason: 'the limit says how to raise it');
+      expect(cmd.claim(fLat, fLng, 0, fromLat: lat, fromLng: lng).ok, isFalse);
+
       // Standing on our own turf: the first 100 m are blocked by spacing, yet a
       // spot ~330 m out is fine with no perk at all.
       final (nLat, nLng) = openSpot(w, lat, lng + 0.0030);
       final nearAway = metersBetween(lat, lng, nLat, nLng);
       expect(nearAway, inInclusiveRange(kBaseSpacingM, kBaseSpacingM + kBasePlantReachM));
       expect(cmd.claimQuote(lat, lng + 0.0005, fromLat: lat, fromLng: lng).blocker, 'Too close to a turf');
-      final near = cmd.claim(nLat, nLng, 0, fromLat: lat, fromLng: lng);
-      expect(near.ok, isTrue, reason: near.message);
-
-      // ~500 m out is past the default range...
-      final (fLat, fLng) = openSpot(w, lat, lng + 0.0045);
-      final farAway = metersBetween(lat, lng, fLat, fLng);
-      expect(farAway, greaterThan(w.perks.plantRangeM + Commands.kPlantSlackM));
-      expect(cmd.claimQuote(fLat, fLng, fromLat: lat, fromLng: lng).blocker, 'Out of plant range');
-      expect(cmd.claim(fLat, fLng, 0, fromLat: lat, fromLng: lng).ok, isFalse);
 
       // ...until Long Arm stretches it.
       while (w.perks.plantRangeM + Commands.kPlantSlackM < farAway) {
@@ -556,6 +567,8 @@ void main() {
       expect(w.perks.plantReachM, greaterThan(kBasePlantReachM));
       final far = cmd.claim(fLat, fLng, 0, fromLat: lat, fromLng: lng);
       expect(far.ok, isTrue, reason: far.message);
+      final near = cmd.claim(nLat, nLng, 0, fromLat: lat, fromLng: lng);
+      expect(near.ok, isTrue, reason: near.message);
       expect(w.index.owned, 3);
     });
 
@@ -646,7 +659,7 @@ void main() {
       }
       hubs[0].relayTarget = hubs[1].id;
       hubs[1].relayTarget = hubs[2].id;
-      for (var i = 0; i < 997; i++) {
+      for (var i = 0; i < kPrestigeHexes - 3; i++) {
         plant(3.0 + (i ~/ 40) * 0.002, 3.0 + (i % 40) * 0.002, 'T$i');
       }
       w.reindex();
@@ -676,6 +689,296 @@ void main() {
       expect(cmd.runJob(job.id, 1).ok, isFalse);
       w.player.energy = 999;
       expect(cmd.runJob(jobs.last.id, 2).ok, isFalse);
+    });
+  });
+
+  group('turf reach', () {
+    test('plants, breaches and pickups reach out from every turf you hold', () {
+      final w = freshWorld(seed: 4);
+      final cmd = Commands(w);
+      w.player
+        ..credits = 1e9
+        ..intel = 1e9
+        ..level = 200;
+      final rival = firstRival(w);
+      // The player sits ~10 km away the whole time.
+      final awayLat = rival.lat - 0.09, awayLng = rival.lng;
+      final (sLat, sLng) = openSpot(w, rival.lat, rival.lng + 0.0018);
+      expect(metersBetween(sLat, sLng, rival.lat, rival.lng), lessThan(cmd.turfStrikeRangeM));
+
+      // Nothing of theirs in reach yet: no plant, no breach.
+      expect(cmd.claimQuote(sLat, sLng, fromLat: awayLat, fromLng: awayLng, remote: true).blocker, 'Out of plant range');
+      expect(cmd.claimQuote(sLat, sLng, remote: true).blocker, 'Out of plant range', reason: 'no GPS fix at all');
+      final noReach = cmd.breachQuote(rival, awayLat, awayLng);
+      expect(noReach.blocker, 'Out of reach');
+      expect(noReach.note, contains('hold a turf within'));
+
+      // One turf planted on the spot, in person.
+      expect(cmd.claim(sLat, sLng, 0, name: 'Outpost').ok, isTrue);
+      final outpost = w.playerTurfs.single;
+      expect(cmd.turfStrikeRangeM, w.perks.plantRangeM, reason: 'no Deep Reach yet');
+
+      // From then on it works from the sofa: plant next to it...
+      final (nLat, nLng) = openSpot(w, sLat, sLng + 0.0015);
+      expect(metersBetween(sLat, sLng, nLat, nLng), lessThanOrEqualTo(w.perks.plantRangeM));
+      expect(cmd.claimVia(nLat, nLng, fromLat: awayLat, fromLng: awayLng)?.id, outpost.id);
+      expect(cmd.claimVia(nLat, nLng, fromLat: nLat, fromLng: nLng), isNull, reason: 'on foot needs no turf');
+      final planted = cmd.claim(nLat, nLng, 1, name: 'Annex', fromLat: awayLat, fromLng: awayLng, remote: true);
+      expect(planted.ok, isTrue, reason: planted.message);
+      expect(cmd.claim(sLat, sLng + 0.02, 1, remote: true).ok, isFalse, reason: '2 km out is nobody\'s reach');
+
+      // ...breach the crew next door...
+      expect(cmd.breachVia(rival, awayLat, awayLng), isNotNull);
+      expect(cmd.breachVia(rival, rival.lat, rival.lng), isNull);
+      expect(cmd.breachQuote(rival, awayLat, awayLng).blocker, isNull);
+      expect(cmd.breachQuote(rival, null, null).blocker, isNull, reason: 'works with no GPS fix too');
+      var seized = false;
+      for (var now = 2; now < 60 && !seized; now++) {
+        seized = cmd.breach(rival.id, awayLat, awayLng, now, name: 'Old Depot').ok;
+      }
+      expect(seized, isTrue);
+      expect(w.turfs[rival.id]!.isPlayer, isTrue);
+
+      // ...and pick up a dead drop that fell near a turf.
+      WorldEvent drop(String id, double lat, double lng) => WorldEvent(
+            id: id,
+            type: EventType.deadDrop,
+            target: 'x',
+            expiresAt: kDay,
+            payload: {'created': 0, 'lat': lat, 'lng': lng, 'materials': 100.0, 'intel': 10.0, 'module': false},
+          );
+      w.events.add(drop('near', outpost.lat + 0.002, outpost.lng)); // ~220 m from Outpost
+      w.events.add(drop('far', outpost.lat + 0.02, outpost.lng)); // ~2.2 km from anything
+      expect(cmd.eventVia(w.events.first, awayLat, awayLng), isNotNull);
+      final mats = w.player.materials;
+      expect(cmd.resolveEvent('near', awayLat, awayLng, 100).ok, isTrue);
+      expect(w.player.materials, mats + 100);
+      final tooFar = cmd.eventQuote('far', awayLat, awayLng);
+      expect(tooFar.blocker, isNotNull);
+      expect(tooFar.note, contains('hold a turf within'));
+    });
+  });
+
+  group('sieges and alerts', () {
+    World corner(int seed, {double aggression = 40}) {
+      final w = freshWorld(seed: seed);
+      final (lat, lng) = openSpot(w);
+      Commands(w).claim(lat, lng, 0, name: 'Corner');
+      for (final f in w.factions) {
+        f.aggression = aggression; // raids nearly every hour, far stronger than the turf
+      }
+      return w;
+    }
+
+    test('a turf cannot be hit for the first time and lost in the same absence', () {
+      final w = corner(5);
+      final t = w.playerTurfs.single;
+      final sim = Simulator(w);
+
+      // The exact case: 12 hours away, raided early, raided again and again.
+      final r = sim.run(0, 12 * kHour, offline: true);
+      expect(r.raidsLost, greaterThan(1));
+      expect(r.turfsCaptured, 0);
+      expect(r.lastStands, greaterThan(0));
+      expect(t.isPlayer, isTrue);
+      expect(t.integrity, kLastStandIntegrity);
+      expect(w.siegeSince(t.id), isNotNull);
+      expect(w.exposed(t), isFalse);
+
+      // However long the absence, it holds until the player has looked.
+      expect(sim.run(12 * kHour, 20 * kDay, offline: true).turfsCaptured, 0);
+      expect(t.isPlayer, isTrue);
+
+      // They open the game, see it, and leave it broken: now it can fall.
+      w.markSeen(20 * kDay);
+      expect(w.exposed(t), isTrue);
+      final after = sim.run(20 * kDay, 21 * kDay, offline: true);
+      expect(after.turfsCaptured, 1);
+      expect(t.isHostile, isTrue);
+      expect(w.siegeSince(t.id), isNull);
+    });
+
+    test('repairing lifts the siege: the next raid starts from scratch', () {
+      final w = corner(6);
+      final cmd = Commands(w);
+      final t = w.playerTurfs.single;
+      final sim = Simulator(w);
+      sim.run(0, 6 * kHour, offline: true);
+      expect(w.siegeSince(t.id), isNotNull);
+
+      w.markSeen(6 * kHour);
+      w.player.materials = 1e6;
+      expect(cmd.repair(t.id, 6 * kHour).ok, isTrue);
+      expect(t.integrity, 100);
+      expect(w.siegeSince(t.id), isNull);
+
+      expect(sim.run(6 * kHour, 3 * kDay, offline: true).turfsCaptured, 0);
+      expect(t.isPlayer, isTrue);
+    });
+
+    test('an offensive nobody saw announced wrecks the hub but cannot take it', () {
+      Turf land({required int announced}) {
+        final w = corner(7);
+        final cmd = Commands(w);
+        final hub = w.playerTurfs.single;
+        cmd.establishHub(hub.id, 0);
+        w.events.add(WorldEvent(
+          id: 'off-1',
+          type: EventType.offensive,
+          target: hub.id,
+          expiresAt: 10 * kHour,
+          payload: {'created': announced, 'faction': 'rival0', 'fortified': false},
+        ));
+        Simulator(w).run(0, 10 * kHour + 1, offline: true);
+        expect(w.events.where((e) => e.id == 'off-1'), isEmpty);
+        return hub;
+      }
+
+      // Announced an hour after the player left: it lands, the hub survives.
+      final unseen = land(announced: kHour);
+      expect(unseen.isPlayer, isTrue);
+      expect(unseen.integrity, lessThan(100));
+      // Announced while they were still watching and ignored: the hub goes.
+      expect(land(announced: -kHour).isHostile, isTrue);
+    });
+
+    test('the alert forecast matches what then happens, and leaves the world alone', () {
+      final w = corner(9, aggression: 10);
+      final cmd = Commands(w);
+      final hub = w.playerTurfs.single;
+      cmd.establishHub(hub.id, 0);
+      w.player.energy = 0;
+      w.pendingLog.clear();
+      const span = 20 * kHour;
+
+      final credits = w.player.credits;
+      final alerts = forecastAlerts(w, 0, horizonMs: span);
+      expect(w.player.credits, credits);
+      expect(w.player.energy, 0);
+      expect(hub.integrity, 100);
+      expect(w.pendingLog, isEmpty);
+      expect(w.events, isEmpty);
+
+      final energy = alerts.firstWhere((a) => a.title == 'Energy full');
+      expect(energy.at, 2 * kHour, reason: '30 energy at 15 an hour');
+      expect(energy.urgent, isFalse);
+      expect(alerts.any((a) => a.urgent), isTrue);
+      expect(alerts.length, lessThanOrEqualTo(kAlertMax));
+      for (var i = 1; i < alerts.length; i++) {
+        expect(alerts[i].at, greaterThanOrEqualTo(alerts[i - 1].at));
+      }
+
+      // The real thing, hour for hour.
+      Simulator(w).run(0, span, offline: true);
+      final real = <(int, bool)>{
+        for (final l in w.pendingLog)
+          if (l.alert != null) (l.ts, l.kind == 'loss'),
+      }.toList()
+        ..sort((a, b) => a.$1 != b.$1 ? a.$1.compareTo(b.$1) : (a.$2 ? 1 : 0) - (b.$2 ? 1 : 0));
+      final predicted = [
+        for (final a in alerts)
+          if (a.title != 'Energy full') (a.at, a.urgent),
+      ]..sort((a, b) => a.$1 != b.$1 ? a.$1.compareTo(b.$1) : (a.$2 ? 1 : 0) - (b.$2 ? 1 : 0));
+      expect(predicted, isNotEmpty);
+      expect(predicted.toSet().difference(real.toSet()), isEmpty, reason: 'no alert for something that never happens');
+      if (alerts.length < kAlertMax) expect(predicted, real);
+    });
+  });
+
+  group('exchange and sockets', () {
+    test('the exchange swaps goods at a fee, up to a daily limit', () {
+      final w = freshWorld();
+      final cmd = Commands(w);
+      expect(kTradeFee, 0.25);
+      expect(cmd.tradeRate(Good.materials, Good.credits), closeTo(2.5 * 0.75, 1e-9));
+      expect(cmd.tradeRate(Good.credits, Good.intel), closeTo(0.75 / 6, 1e-9));
+      expect(cmd.tradeRate(Good.credits, Good.materials) * cmd.tradeRate(Good.materials, Good.credits),
+          closeTo(0.5625, 1e-9),
+          reason: 'there and back loses to the fee twice');
+
+      expect(cmd.tradeCap, 1000, reason: 'level 1, no income');
+      final out = cmd.trade(Good.credits, Good.materials, 500, 0);
+      expect(out.ok, isTrue, reason: out.message);
+      expect(w.player.credits, kStartCredits - 500);
+      expect(w.player.materials, closeTo(kStartMaterials + 150, 1e-9));
+      expect(cmd.tradeLeft(0), 500);
+      expect(cmd.tradeMax(Good.credits, 0), 500);
+      expect(cmd.tradeMax(Good.intel, 0), kStartIntel, reason: 'capped by what you hold');
+
+      expect(cmd.trade(Good.materials, Good.intel, 250, 0).ok, isFalse, reason: "625 credits' worth, 500 left");
+      expect(cmd.trade(Good.credits, Good.credits, 10, 0).ok, isFalse);
+      expect(cmd.trade(Good.intel, Good.credits, 60, 0).ok, isFalse, reason: 'only 50 intel');
+
+      // A new day brings the limit back; level and income raise it.
+      expect(cmd.tradeLeft(kDay), 1000);
+      w.player.level = 5;
+      expect(cmd.tradeCap, 2000);
+      final (lat, lng) = openSpot(w);
+      cmd.claim(lat, lng, kDay);
+      expect(cmd.tradeCap, closeTo(2000 + 12 * cmd.hourlyValue, 1e-9));
+      expect(cmd.hourlyValue, greaterThan(0));
+    });
+
+    test('a socket can be bought on any turf, each one at double the price', () {
+      final w = freshWorld(seed: 13);
+      final cmd = Commands(w);
+      w.player
+        ..credits = 1e9
+        ..materials = 1e9
+        ..intel = 1e9;
+      final (lat, lng) = openSpot(w);
+      cmd.claim(lat, lng, 0, name: 'Workshop');
+      final t = w.playerTurfs.single;
+      expect(w.socketsOf(t), 1);
+      expect(cmd.socketQuote(t.id).cost.credits, 1200);
+      expect(cmd.expandSocket(t.id, 0).ok, isTrue);
+      expect(w.socketsOf(t), 2);
+      expect(cmd.socketQuote(t.id).cost.credits, 2400);
+      expect(cmd.socketQuote(t.id).cost.intel, 200);
+
+      final mods = [for (var i = 1; i <= 3; i++) dropModule(w, Rng(i), 0)];
+      expect(cmd.install(mods[0].id, t.id, 0).ok, isTrue);
+      expect(cmd.install(mods[1].id, t.id, 0).ok, isTrue);
+      expect(cmd.install(mods[2].id, t.id, 0).ok, isFalse, reason: 'two sockets, two modules');
+
+      // Lives in the settings, so it travels with the save.
+      final saved = (jsonDecode(jsonEncode(w.player.settings)) as Map).cast<String, dynamic>();
+      expect((saved[kSocketsKey] as Map)[t.id], 1);
+
+      expect(cmd.delete(t.id, 1).ok, isTrue);
+      expect(w.extraSockets(t.id), 0);
+      expect(w.stash, hasLength(3));
+    });
+
+    test('the breakdown of a turf multiplies out to what it pays', () {
+      final w = freshWorld(seed: 77);
+      final cmd = Commands(w);
+      w.player
+        ..credits = 1e9
+        ..materials = 1e9;
+      final (lat, lng) = openSpot(w);
+      cmd.claim(lat, lng, 0, name: 'Gara', isStation: true);
+      final hub = w.playerTurfs.single;
+      cmd.establishHub(hub.id, 0);
+      cmd.upgradeGarrison(hub.id, 0);
+      final (fLat, fLng) = openSpot(w, lat, lng + 0.05); // ~5.5 km: no hub in reach
+      cmd.claim(fLat, fLng, 0, name: 'Far');
+      final far = w.playerTurfs.firstWhere((t) => t.name == 'Far');
+
+      for (final t in w.playerTurfs) {
+        final parts = w.index.turfYield[t.id]!;
+        final y = w.index.turfHourly[t.id]!;
+        expect(parts.total.credits, y.credits);
+        expect(parts.total.materials, y.materials);
+        expect(parts.total.intel, y.intel);
+      }
+      final h = w.index.turfYield[hub.id]!;
+      expect(h.station, kStationCreditBonus);
+      expect(h.hub, hubYieldMult(1));
+      expect(h.garrison, garrisonYieldMult(2));
+      expect(h.supply, 1);
+      expect(w.index.turfYield[far.id]!.supply, kUnsuppliedYield);
+      expect(w.index.turfYield[far.id]!.hub, 1);
     });
   });
 
@@ -711,7 +1014,8 @@ void main() {
       expect(cmd.prestigeStatus().ready, isFalse);
       expect(cmd.liquidate(0, 77).ok, isFalse);
 
-      // Fabricate a mega-empire: 1000 turfs, three L30 hubs in three districts.
+      // Fabricate an empire at the threshold: 50 turfs, three L30 hubs in three regions.
+      expect(kPrestigeHexes, 50);
       Turf plant(double lat, double lng, String name) {
         final t = w.makeTurf(lat: lat, lng: lng, name: name, owner: kPlayer, now: 0);
         w.addTurf(t);
@@ -726,12 +1030,16 @@ void main() {
       }
       hubs[0].relayTarget = hubs[1].id;
       hubs[1].relayTarget = hubs[2].id;
-      for (var i = 0; i < 997; i++) {
+      for (var i = 0; i < kPrestigeHexes - 4; i++) {
         plant(3.0 + (i ~/ 40) * 0.002, 3.0 + (i % 40) * 0.002, 'T$i');
       }
       w.reindex();
+      expect(cmd.prestigeStatus().hexesMet, isFalse, reason: 'one turf short');
+      expect(cmd.liquidate(0, 77).ok, isFalse);
+      plant(3.5, 3.5, 'Last');
+      w.reindex();
       final s = cmd.prestigeStatus();
-      expect(s.owned, 1000);
+      expect(s.owned, kPrestigeHexes);
       expect(s.districts, greaterThanOrEqualTo(3));
       expect(s.ready, isTrue);
 

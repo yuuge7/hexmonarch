@@ -203,10 +203,40 @@ double decayPerHour(Turf h) {
   return h.anomaly == Anomaly.bunker ? base * 0.5 : base;
 }
 
+/// A raid that would take a turf you have not seen being hit leaves it
+/// standing at this much instead. Rivals can only seize a turf once you have
+/// opened the game since its first unanswered hit (see World.exposed).
+const kLastStandIntegrity = 5.0;
+
 // ---------------------------------------------------------------- sockets
 
+/// Sockets a turf has from its own levels. Bought ones come on top
+/// (World.socketsOf).
 int socketCount(Turf h) =>
     h.isHub ? 2 + h.hubLevel ~/ 5 : 1 + (h.garrison - 1) ~/ 10;
+
+/// Price of one more socket on a turf that already bought [extra] of them.
+Cost socketExpandCost(int extra, {required double discount}) => Cost(
+      credits: 1200 * math.pow(2, extra) * discount,
+      materials: 400 * math.pow(2, extra) * discount,
+      intel: 100 * math.pow(2, extra) * discount,
+    );
+
+// ---------------------------------------------------------------- exchange
+
+/// What one unit of a good is worth on the exchange, in credits.
+double goodValue(Good g) => switch (g) {
+      Good.credits => 1.0,
+      Good.materials => 2.5,
+      Good.intel => 6.0,
+    };
+
+/// The fence's cut on every trade.
+const kTradeFee = 0.25;
+
+/// Credits' worth of goods the exchange will move in one day. Grows with the
+/// player's level and with what the empire produces per hour.
+double tradeDailyCap(int level, double hourlyValue) => 1000 + 250.0 * (level - 1) + 12 * hourlyValue;
 
 // ---------------------------------------------------------------- offline
 
@@ -214,7 +244,7 @@ const kOfflineBase = 0.6;
 
 // ---------------------------------------------------------------- prestige
 
-const kPrestigeHexes = 1000;
+const kPrestigeHexes = 50;
 const kPrestigeDistricts = 3;
 const kPrestigeCapitalLevel = 30;
 

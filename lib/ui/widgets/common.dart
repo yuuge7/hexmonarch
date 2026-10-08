@@ -346,6 +346,69 @@ class TagChip extends StatelessWidget {
       );
 }
 
+/// Chamfered toggle: section switches and option rows.
+class SegChip extends StatelessWidget {
+  const SegChip(this.label, {super.key, required this.on, required this.onTap, this.color = Palette.mint, this.height = 36});
+  final String label;
+  final bool on;
+  final VoidCallback onTap;
+  final Color color;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        selected: on,
+        label: label,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onTap,
+          child: Container(
+            height: height,
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            decoration: ShapeDecoration(
+              color: on ? color : Colors.transparent,
+              shape: chamfer(7, on ? null : Palette.textDim.withValues(alpha: 0.7)),
+            ),
+            child: Text(
+              label.toUpperCase(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyles.label.copyWith(
+                fontSize: 11,
+                letterSpacing: 0.8,
+                fontWeight: FontWeight.w700,
+                color: on ? Palette.carbon : Palette.textDim,
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+/// "+12 CR  +0.8 MAT  +0.2 INT": what something supplies, each resource in
+/// its own colour.
+class YieldLine extends StatelessWidget {
+  const YieldLine(this.y, {super.key, this.size = 11.5, this.suffix});
+  final Resources y;
+  final double size;
+  final String? suffix;
+
+  @override
+  Widget build(BuildContext context) => Text.rich(
+        TextSpan(children: [
+          TextSpan(text: '+${fmtNum(y.credits)} CR', style: const TextStyle(color: Palette.amber)),
+          TextSpan(text: '  +${fmtNum(y.materials)} MAT', style: const TextStyle(color: Palette.text)),
+          TextSpan(text: '  +${fmtNum(y.intel)} INT', style: const TextStyle(color: Palette.ice)),
+          if (suffix != null) TextSpan(text: suffix, style: const TextStyle(color: Palette.textDim)),
+        ]),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyles.dataSmall.copyWith(fontSize: size, fontWeight: FontWeight.w600),
+      );
+}
+
 /// Rebuilds every second (resource counters, countdowns, affordability).
 class Ticking extends StatelessWidget {
   const Ticking({super.key, required this.tick, required this.builder});

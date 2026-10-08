@@ -9,6 +9,7 @@ import '../domain/actions.dart';
 import '../domain/models.dart';
 import '../game/game_controller.dart';
 import '../platform/location_service.dart';
+import 'anomaly_dialog.dart';
 import 'hud.dart';
 import 'map/tactical_map.dart';
 import 'panels/crew_panel.dart';
@@ -73,6 +74,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _maybeReport() {
+    if (game.clockCheat && mounted) {
+      game.clockCheat = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) showClockAnomaly(context, game);
+      });
+    }
     final r = game.pendingReport;
     if (r == null || !mounted) return;
     game.pendingReport = null;
@@ -104,11 +111,11 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// Open ground becomes the plant target. Without a GPS fix there is no range
-  /// to plant from, so the tap just returns the console to where you stand.
-  /// Map-only mode has no plant button, so there the tap only clears.
+  /// Open ground becomes the plant target. With no GPS fix and no turf there
+  /// is nothing to plant from, so the tap just returns the console to where
+  /// you stand. Map-only mode has no plant button, so there the tap only clears.
   void _onGroundTap(double lat, double lng) {
-    if (game.lat != null && !game.mapOnly) {
+    if ((game.lat != null || game.index.owned > 0) && !game.mapOnly) {
       game.pickGround(lat, lng);
       if (_tab != ConsoleTab.turf) setState(() => _tab = ConsoleTab.turf);
     } else {

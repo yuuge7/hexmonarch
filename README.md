@@ -39,8 +39,9 @@ The player manual is [GUIDE.md](GUIDE.md). The same file is shown in the game un
 ## Features
 
 - **Point turfs, Turf Wars style.** A turf is a circle planted at your exact GPS
-  position, or on any open ground you tap within plant range. No visible grid, no
-  adjacency rule; turfs only need to sit 100 m apart.
+  position, or on any open ground you tap within plant range of you or of a turf you
+  hold. Turfs also breach rivals and collect convoys and dead drops in their reach. No
+  visible grid, no adjacency rule; turfs only need to sit 100 m apart.
 - **Stations as a backbone.** Turfs are named after the nearest station, landmark or
   street, read from the offline map. A turf at a transit station earns more, survives
   without a hub and relays farther. Auto-plant can claim every station you ride past.
@@ -49,8 +50,14 @@ The player manual is [GUIDE.md](GUIDE.md). The same file is shown in the game un
   towns; every linked district multiplies income.
 - **Rivals that keep up.** Three AI factions hold turfs, raid yours every hour, expand
   next to you and launch offensives. Their strength follows your best hub, with no cap.
-- **Jobs, perks, loot.** Energy-based jobs with mastery, permanent street perks (plant
-  range, turf spacing, relay range and more), procedural modules to socket into turfs.
+  A turf cannot be hit for the first time and lost in the same absence: it holds at 5%
+  until the player has opened the game.
+- **Alerts without a server.** The simulation is deterministic, so the game forecasts
+  the next three days when it closes and queues local notifications for raids, turfs
+  about to fall, offensives, convoys and full energy.
+- **Jobs, perks, loot, trade.** Energy-based jobs with mastery, permanent street perks
+  (plant range, turf spacing, relay range and more), procedural modules to socket into
+  turfs, an exchange that swaps credits, materials and intel, buyable module sockets.
 - **A daily Event Deck.** Lockdowns, convoys, dead drops, market swings, surges.
 - **Prestige.** Network Liquidation sells the empire for permanent upgrades and rolls a
   new world.
@@ -63,14 +70,16 @@ The player manual is [GUIDE.md](GUIDE.md). The same file is shown in the game un
 
 | | |
 | --- | --- |
-| **Turf** | Circle zone at a point. Plant range is spacing + 250 m (350 m by default), more with the Long Arm perk. Abandon removes a turf; delete also keeps rivals and auto-plant off the spot. |
+| **Turf** | Circle zone at a point. Plant range is spacing + 250 m (350 m by default), more with the Long Arm perk, measured from the player or from any turf they hold. Breaches and pickups reach the same distance from a turf. Abandon removes a turf; delete also keeps rivals and auto-plant off the spot. |
+| **Siege** | The first unanswered raid on a turf starts a siege. Until the player has opened the game since then, a raid that would take the turf leaves it at 5%. Repairing to 100% lifts the siege. |
+| **Trade** | Material = 2.5 credits, intel = 6 credits, 25% fee. Daily limit `1000 + 250 x (level - 1) + 12 x hourly output` in credits' worth. Extra socket on a turf: 1,200 cr, 400 mat, 100 int, doubling per turf. |
 | **Station turf** | Within 250 m of a train, metro or tram station: +30% credits, relay range x1.5 as a hub, runs at 70% with no hub. One per station. |
 | **Anchor Hub** | Any turf can become one. Supply sphere `2.0 + 0.5 x sqrt(level)` km. Each extra hub costs x1.4 more. Unsupplied ordinary turfs yield 40% and wear down to a floor; they are never deleted by decay. |
 | **Relay** | One outbound link per hub, range `10 + 2.5 x level` km, x1.5 from a station hub, +20% per Signal Boost rank. Trade multiplier `1 + 0.30 x extra districts + 0.04 x relays`. |
 | **Jobs** | Energy 15/h, cap 30. x1.5 pay inside your own turf, mastery every 10 runs. |
 | **Street perks** | Long Arm, Deep Reach, Close Quarters, Signal Boost, Muscle, Deep Bench, Second Wind, Street Smarts, Safehouses. Kept through prestige. |
 | **Event Deck** | 2 to 4 cards every 24 h: lockdown, convoy, dead drop, market, surge, offensive. |
-| **Prestige** | 1,000 turfs, 3 regions linked by relays, a level 30 hub. Pays Offshore Cryptokeys for infinite vault upgrades. |
+| **Prestige** | 50 turfs, 3 regions linked by relays, a level 30 hub. Pays Offshore Cryptokeys for infinite vault upgrades. |
 
 Player levels move the story through three tiers (Grounded Start, Corporate Syndicate,
 Sci-Fi Escalation), then a new Epoch every 50 levels.
@@ -108,7 +117,7 @@ also builds the native parts (SQLite, H3).
 
 ```
 flutter analyze                    # must report no issues
-flutter test                       # 43 engine tests, no device needed
+flutter test                       # 51 engine tests, no device needed
 flutter build apk --release        # release APK in build/app/outputs/flutter-apk/
 dart run build_runner build        # only after editing lib/data/schema.drift
 dart format <files you changed>    # page width 120, set in analysis_options.yaml
@@ -130,7 +139,8 @@ after launching the app. Debug builds add two tools that release builds do not h
 
 - Long-press the map to teleport there.
 - **Network > Debug** warps the game clock by 1, 8 or 24 hours to exercise offline
-  catch-up, raids and the Event Deck.
+  catch-up, raids and the Event Deck. "Test alert" posts a notification 15
+  seconds after the app next goes to the background.
 
 Vector tiles for a dense city are large; the first render after a cold start can take
 around ten seconds on an emulator.
@@ -146,6 +156,7 @@ lib/
     balance.dart     every tunable number
     world.dart       in-memory state and the derived index (supply, networks, yields)
     simulation.dart  catch-up engine, raids, Event Deck director
+    forecast.dart    dry run of the coming days: what to notify the player about
     actions.dart     player commands with quotes (cost and blocker)
     perks.dart, jobs.dart, loot.dart, tiers.dart, vault.dart, genetics.dart
     time_guard.dart  anti-tamper clock verdict
@@ -154,7 +165,8 @@ lib/
   ui/          home screen, map painters, console panels, turf roster, manual
 test/          engine tests on a pure-Dart grid stand-in (no device, no H3)
 assets/map/    two vector map styles: dark, and white for sunlight
-android/       Gradle project, MainActivity.kt (clock and haptics channel)
+android/       Gradle project, MainActivity.kt (clock and haptics channel),
+               AlertScheduler.kt (local notifications as alarms)
 .github/       release workflow and its version script
 GUIDE.md       player manual, bundled into the app
 ```
@@ -171,12 +183,18 @@ GUIDE.md       player manual, bundled into the app
   timer while the boot count is unchanged, so changing the device date earns nothing.
   After a reboot the wall clock is checked against the last sync and against network
   time when available.
+- **Notifications are forecasts.** There is no server to push anything. When the app
+  goes to the background, `forecastAlerts` runs the next 72 hours on a copy of the
+  world and hands the alert-worthy moments to `AlertScheduler.kt`, which queues them
+  as inexact alarms on the monotonic clock and re-queues them after a reboot. Opening
+  the app cancels them; the catch-up then replays the same hours for real.
 - **H3 is underneath, never drawn.** Resolution 11 cell is the turf key, resolution 9
   the "block" that decides biome, anomaly and rival spawns, resolution 5 the district
   (town-sized, drives trade and lockdowns), resolution 4 the region (prestige gate).
 - **Persistence is batched.** The `World` marks what changed; `Repository.flush` writes
-  it in one transaction. Settings and small lists (for example deleted-turf spots) live
-  in the player row's JSON, so they need no schema change.
+  it in one transaction. Settings and small state (deleted-turf spots, sieges, bought
+  sockets, the day's trade volume) live in the player row's JSON, so they need no
+  schema change.
 - **The map is offline after first sight.** `flutter_map` with `vector_map_tiles`,
   OpenMapTiles schema served by OpenFreeMap with no API key. Tiles are stored for good
   under app support `vtiles/z/x/y.pbf`; the place namer reads station and street names

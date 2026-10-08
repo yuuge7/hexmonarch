@@ -12,6 +12,7 @@ import '../core/theme.dart';
 import '../data/database.dart';
 import '../domain/actions.dart';
 import '../domain/balance.dart';
+import '../domain/forecast.dart';
 import '../domain/models.dart';
 import '../domain/perks.dart';
 import '../domain/simulation.dart';
@@ -108,6 +109,15 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
   PlaceHit? pickPlace;
   bool get hasPick => pickLat != null;
 
+  /// What blocks a plant at the picked spot, and the turf it would reach out
+  /// from when the player is not in range on foot.
+  String? pickBlocker;
+  Turf? pickVia;
+
+  /// The device clock was pushed forward to fish for offline income: the UI
+  /// answers once.
+  bool clockCheat = false;
+
   /// Standing inside one of your own turfs: jobs pay the home-turf bonus.
   bool get atHome => hereZone != null && world.turfs[hereZone]?.isPlayer == true;
 
@@ -127,6 +137,12 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
 
   bool get patrolMode => player.settings['patrol'] == true;
   bool get hapticsOn => player.settings['haptics'] != false;
+
+  /// Alerts while the game is closed: wanted by the player, and allowed by
+  /// the system.
+  bool get notifyOn => player.settings['notify'] != false;
+  bool notifyAllowed = true;
+  bool _debugAlert = false;
 
   /// White basemap with dark inks, for reading the screen in direct sunlight.
   bool get sunMap => player.settings['sunMap'] == true;
@@ -178,7 +194,8 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
       notifyListeners();
       WidgetsBinding.instance.addObserver(this);
       _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _onTick());
-      unawaited(_startLocation());
+      // One system dialog at a time: location first, then notifications.
+      unawaited(_startLocation().then((_) => _initAlerts()));
       if (lat != null) unawaited(_refreshPlace(force: true));
     } catch (e, st) {
       debugPrint('boot failed: $e\n$st');
@@ -214,6 +231,7 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
       } else {
         world.log(now, 'loss', 'Clock anomaly: ${verdict.tamperReason}. Time credited from the hardware timer only.');
       }
+      if (verdict.fastForward) clockCheat = true;
     }
 
     final from = p.lastSync;
@@ -228,9 +246,11 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
         t = e;
         await Future<void>.delayed(Duration.zero);
       }
-      if (to - from >= 5 * 60 * 1000 && !firstBoot && report.eventful) pendingReport = report;
+      if (to - from >= 5 * 60 * 1000 && !firstBoot && report.eventful && !clockCheat) pendingReport = report;
     }
     _simCursor = to;
+    // Only now has the player seen what happened while they were away.
+    world.markSeen(to);
     await _flush(sample);
   }
 
@@ -258,11 +278,18 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
   /// Mirrors not-yet-shown pending log lines into the in-memory feed. The
   /// pending list itself is only cleared by the repository on flush.
   int _drained = 0;
-  void _drainLog() {
+  void _drainLog({bool live = false}) {
     final pending = world.pendingLog;
     if (_drained > pending.length) _drained = 0;
     for (var i = _drained; i < pending.length; i++) {
-      recentLog.insert(0, pending[i]);
+      final l = pending[i];
+      recentLog.insert(0, l);
+      // Raids and deals that land while the game is on screen.
+      if (live && l.alert != null) {
+        final bad = l.kind == 'loss';
+        toasts.add(Outcome(!bad, l.message));
+        unawaited(bridge.haptic(bad ? Buzz.warn : Buzz.click));
+      }
     }
     _drained = pending.length;
     if (recentLog.length > 200) recentLog.removeRange(200, recentLog.length);
@@ -274,7 +301,8 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
     final rev = world.revision;
     _sim.run(_simCursor, t, offline: false);
     _simCursor = t;
-    _drainLog();
+    world.markSeen(t);
+    _drainLog(live: true);
     tick.value = ++_ticks;
     if (world.revision != rev) {
       _refreshZone();
@@ -294,7 +322,9 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
         _paused = true;
         _sim.run(_simCursor, now, offline: false);
         _simCursor = now;
+        world.markSeen(_simCursor);
         unawaited(_flush());
+        _scheduleAlerts();
         if (!patrolMode) location.stop();
       case AppLifecycleState.resumed:
         if (!_paused) return;
@@ -306,11 +336,74 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _onResume() async {
+    unawaited(bridge.cancelAlerts());
     final sample = await bridge.clock();
     await _resumeFrom(sample);
+    notifyAllowed = await bridge.notificationsAllowed();
     _refreshZone();
     notifyListeners();
     unawaited(_startLocation());
+  }
+
+  // ------------------------------------------------------------ alerts
+
+  Future<void> _initAlerts() async {
+    await bridge.cancelAlerts();
+    notifyAllowed = await bridge.notificationsAllowed();
+    if (notifyOn && !notifyAllowed && player.settings['notifyAsked'] != true) {
+      player.settings['notifyAsked'] = true;
+      notifyAllowed = await bridge.requestNotifications();
+    }
+    notifyListeners();
+  }
+
+  /// Queues notifications for what the coming days bring while the game is
+  /// closed. The simulation is deterministic, so this is known the moment the
+  /// app leaves the screen.
+  void _scheduleAlerts() {
+    if (stage != BootStage.ready) return;
+    if (!notifyOn) {
+      unawaited(bridge.cancelAlerts());
+      return;
+    }
+    try {
+      final t = now;
+      final alerts = forecastAlerts(world, t, xpCarry: _sim.xpCarry);
+      unawaited(bridge.scheduleAlerts([
+        for (final a in alerts) (inMs: a.at - t, title: a.title, body: a.body, urgent: a.urgent),
+        if (_debugAlert)
+          (inMs: 15000, title: 'Turf under attack', body: 'Test alert: this is what a raid looks like.', urgent: true),
+      ]));
+      _debugAlert = false;
+    } catch (e) {
+      debugPrint('alert forecast failed: $e');
+    }
+  }
+
+  Future<void> setNotifications(bool on) async {
+    if (on) {
+      notifyAllowed = await bridge.requestNotifications();
+      // Refused for good: only the system screen can turn them back on.
+      if (!notifyAllowed) await bridge.openNotificationSettings();
+    } else {
+      await bridge.cancelAlerts();
+    }
+    await setSetting('notify', on);
+  }
+
+  /// Debug-only: what a forward clock jump gets you.
+  void debugClockCheat() {
+    if (!kDebugMode) return;
+    clockCheat = true;
+    notifyListeners();
+  }
+
+  /// Debug-only: the next time the app leaves the screen, a test alert
+  /// follows 15 seconds later.
+  void debugArmAlert() {
+    if (!kDebugMode) return;
+    _debugAlert = true;
+    toasts.add(const Outcome(true, 'Test alert armed: leave the app, it fires in 15 s'));
   }
 
   // ------------------------------------------------------------ location
@@ -351,7 +444,19 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
     unawaited(_refreshPlace());
   }
 
+  void _refreshPick() {
+    final la = pickLat, ln = pickLng;
+    if (la == null || ln == null) {
+      pickBlocker = null;
+      pickVia = null;
+      return;
+    }
+    pickBlocker = actions.claimQuote(la, ln, fromLat: lat, fromLng: lng, remote: true).blocker;
+    pickVia = actions.claimVia(la, ln, fromLat: lat, fromLng: lng);
+  }
+
   void _refreshZone() {
+    _refreshPick();
     if (lat == null) return;
     hereZone = world.zoneAt(lat!, lng!)?.id;
     final fx = world.perks;
@@ -412,6 +517,7 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
     selected = (turfId == hereZone) ? null : turfId;
     pickLat = pickLng = null;
     pickPlace = null;
+    _refreshPick();
     notifyListeners();
   }
 
@@ -421,6 +527,7 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
     pickLat = la;
     pickLng = ln;
     pickPlace = null;
+    _refreshPick();
     notifyListeners();
     unawaited(_lookupPick(la, ln));
   }
@@ -437,12 +544,15 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// Plants at the picked spot (must be inside your plant range).
+  /// Plants at the picked spot (must be inside the plant range of the player
+  /// or of one of their turfs).
   Outcome claimPick() {
     final la = pickLat, ln = pickLng;
     if (la == null || ln == null) return const Outcome.fail('Tap a spot on the map first');
     final (name, station) = turfIdentity(pickPlace);
-    final out = run((a, t) => a.claim(la, ln, t, name: name, isStation: station, fromLat: lat, fromLng: lng));
+    final out = run(
+      (a, t) => a.claim(la, ln, t, name: name, isStation: station, fromLat: lat, fromLng: lng, remote: true),
+    );
     if (out.ok) {
       final planted = world.zoneAt(la, ln);
       select(planted?.id);
@@ -459,6 +569,7 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
     final t = now;
     _sim.run(_simCursor, t, offline: false);
     _simCursor = t;
+    if (!_paused) world.markSeen(t);
     final out = op(actions, t);
     _refreshZone();
     _drainLog();
@@ -467,6 +578,9 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
     tick.value = ++_ticks;
     unawaited(_flush());
+    // Auto-plant on patrol changed the empire behind a dark screen: what was
+    // forecast when the app went to the background no longer holds.
+    if (_paused) _scheduleAlerts();
     return out;
   }
 
@@ -627,6 +741,7 @@ class GameController extends ChangeNotifier with WidgetsBindingObserver {
     final report = SimReport(from, now);
     _sim.run(_simCursor, now, offline: true, into: report);
     _simCursor = now;
+    world.markSeen(_simCursor);
     pendingReport = report;
     _refreshZone();
     _drainLog();

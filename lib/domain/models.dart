@@ -4,6 +4,8 @@
 // Territory is point-based (Turf Wars style): a Turf is a circle zone around
 // the exact spot the player claimed. H3 stays underneath as the spatial key.
 
+import 'dart:convert';
+
 enum Biome {
   commercial('commercial', 'Commercial Transit', 'High cash throughput'),
   municipal('municipal', 'Municipal Records', 'Yields research & intel'),
@@ -151,6 +153,26 @@ class Turf {
 
   bool get isPlayer => owner == kPlayer;
   bool get isHostile => isFactionOwner(owner);
+
+  Turf copy() => Turf(
+        id: id,
+        block: block,
+        district: district,
+        lat: lat,
+        lng: lng,
+        name: name,
+        biome: biome,
+        anomaly: anomaly,
+        owner: owner,
+        lastTick: lastTick,
+        isStation: isStation,
+        garrison: garrison,
+        integrity: integrity,
+        isHub: isHub,
+        hubLevel: hubLevel,
+        relayTarget: relayTarget,
+        capturedAt: capturedAt,
+      );
 }
 
 class Module {
@@ -183,6 +205,20 @@ class Module {
   /// Single comparable number for sorting "which one is better".
   double get score =>
       cashMult + defMult + (perk == null ? 0 : 0.08 * rarity.mult) + itemLevel * 1e-4;
+
+  Module copy() => Module(
+        id: id,
+        name: name,
+        rarity: rarity,
+        cashMult: cashMult,
+        defMult: defMult,
+        itemLevel: itemLevel,
+        perk: perk,
+        perkValue: perkValue,
+        hexId: hexId,
+        socket: socket,
+        acquiredAt: acquiredAt,
+      );
 }
 
 class WorldEvent {
@@ -206,6 +242,9 @@ class WorldEvent {
   /// Field events (convoy, dead drop) sit on an exact point.
   double? get lat => (payload['lat'] as num?)?.toDouble();
   double? get lng => (payload['lng'] as num?)?.toDouble();
+
+  WorldEvent copy() =>
+      WorldEvent(id: id, type: type, target: target, expiresAt: expiresAt, payload: Map.of(payload));
 }
 
 class Faction {
@@ -224,6 +263,26 @@ class Faction {
   int nemesisRank;
   int wins;
   int losses;
+
+  Faction copy() => Faction(
+        id: id,
+        archetype: archetype,
+        aggression: aggression,
+        nemesisRank: nemesisRank,
+        wins: wins,
+        losses: losses,
+      );
+}
+
+/// The three resources, as goods on the exchange.
+enum Good {
+  credits('CR', 'Credits'),
+  materials('MAT', 'Materials'),
+  intel('INT', 'Intel');
+
+  const Good(this.unit, this.label);
+  final String unit;
+  final String label;
 }
 
 class PlayerData {
@@ -276,6 +335,48 @@ class PlayerData {
 
   /// Spent on jobs, regenerates over time.
   double energy;
+
+  double have(Good g) => switch (g) {
+        Good.credits => credits,
+        Good.materials => materials,
+        Good.intel => intel,
+      };
+
+  void add(Good g, double amount) {
+    switch (g) {
+      case Good.credits:
+        credits += amount;
+      case Good.materials:
+        materials += amount;
+      case Good.intel:
+        intel += amount;
+    }
+  }
+
+  PlayerData copy() => PlayerData(
+        credits: credits,
+        materials: materials,
+        intel: intel,
+        keys: keys,
+        level: level,
+        xp: xp,
+        lastLat: lastLat,
+        lastLng: lastLng,
+        lastSync: lastSync,
+        monotonic: monotonic,
+        worldSeed: worldSeed,
+        bootCount: bootCount,
+        wallAtSync: wallAtSync,
+        tamperStrikes: tamperStrikes,
+        blueprints: blueprints,
+        liquidations: liquidations,
+        lifetimeCredits: lifetimeCredits,
+        lastEventDay: lastEventDay,
+        heat: heat,
+        createdAt: createdAt,
+        settings: (jsonDecode(jsonEncode(settings)) as Map).cast<String, dynamic>(),
+        energy: energy,
+      );
 }
 
 class Resources {

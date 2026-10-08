@@ -53,6 +53,14 @@ Future<void> showReport(BuildContext context, SimReport r) {
                 Expanded(child: StatCell('Modules', '+${r.modulesFound}', color: Palette.mint)),
               ],
             ),
+            if (r.lastStands > 0) ...[
+              const SizedBox(height: 12),
+              Text(
+                '${r.lastStands} turf${r.lastStands == 1 ? '' : 's'} would have fallen and held at 5% instead: '
+                'rivals cannot take a turf before you have seen it hit. Repair now, the next raid that breaks one takes it.',
+                style: TextStyles.body.copyWith(fontSize: 13, color: Palette.hostile),
+              ),
+            ],
             if (r.headlines.isNotEmpty) ...[
               const SizedBox(height: 14),
               const Eyebrow('Headlines'),

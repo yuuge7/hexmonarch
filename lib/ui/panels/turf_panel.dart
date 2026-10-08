@@ -8,6 +8,7 @@ import '../../domain/loot.dart';
 import '../../domain/models.dart';
 import '../../domain/perks.dart';
 import '../../domain/tiers.dart';
+import '../../domain/world.dart';
 import '../../game/game_controller.dart';
 import '../../geo/hex_grid.dart';
 import '../../platform/location_service.dart';
@@ -114,8 +115,11 @@ class _GroundBody extends StatelessWidget {
     final block = game.grid.cellAt(lat, lng, kPlayRes);
     final genome = w.genome(block);
     final q = remote
-        ? game.actions.claimQuote(lat, lng, fromLat: game.lat, fromLng: game.lng)
+        ? game.actions.claimQuote(lat, lng, fromLat: game.lat, fromLng: game.lng, remote: true)
         : game.actions.claimQuote(lat, lng);
+    final via = remote && q.blocker != 'Out of plant range'
+        ? game.actions.claimVia(lat, lng, fromLat: game.lat, fromLng: game.lng)
+        : null;
     final away = remote && game.lat != null ? metersBetween(game.lat!, game.lng!, lat, lng) : null;
     final near = w.nearest(lat, lng, withinM: 2000);
     final base = biomeYield(genome.biome);
@@ -143,6 +147,7 @@ class _GroundBody extends StatelessWidget {
                 spacing: 6,
                 runSpacing: 6,
                 children: [
+                  if (via != null) TagChip('In reach of ${via.name}', color: Palette.mint, filled: true),
                   if (station) const TagChip('Transit station · +30% credits · relay x1.5', color: Palette.amber, filled: true),
                   TagChip(genome.biome.label, color: Palette.textDim),
                   if (genome.anomaly != null)
@@ -173,8 +178,8 @@ class _GroundBody extends StatelessWidget {
               if (!remote) ...[
                 const SizedBox(height: 10),
                 Text(
-                  'Or tap any open spot inside the dotted ring to plant there: '
-                  '${game.world.perks.plantReachM.round()} m of reach past the dimmed no-plant gaps.',
+                  'Or tap open ground within ${game.world.perks.plantRangeM.round()} m of you or of any turf you hold '
+                  '(the green outlines) to plant there without walking over.',
                   style: TextStyles.bodyDim.copyWith(fontSize: 12),
                 ),
               ],
@@ -228,6 +233,9 @@ class _TurfBody extends StatelessWidget {
     final supplier = supplierId == null ? null : w.turfs[supplierId];
     final net = supplierId == null ? null : ix.networkOfHub(supplierId);
 
+    final strikeFrom = mine ? null : game.actions.breachVia(t, game.lat, game.lng);
+    final siege = mine ? w.siegeSince(t.id) : null;
+
     final relevant = [
       for (final e in w.events)
         if (e.target == t.id || (mine && e.type == EventType.lockdown && e.district == t.district)) e,
@@ -270,6 +278,7 @@ class _TurfBody extends StatelessWidget {
         runSpacing: 6,
         children: [
           if (t.isHub && mine) TagChip('${hubClass(t.hubLevel)} · hub L${t.hubLevel}', color: Palette.amber, filled: true),
+          if (strikeFrom != null) TagChip('In reach of ${strikeFrom.name}', color: Palette.mint, filled: true),
           if (t.isStation) const TagChip('Transit station', color: Palette.amber, filled: true),
           TagChip(t.biome.label, color: Palette.textDim),
           if (t.anomaly != null && (mine || inside))
@@ -278,6 +287,14 @@ class _TurfBody extends StatelessWidget {
       ),
       const SizedBox(height: 10),
       if (mine) _SupplyLine(supplier: supplier?.name, isHub: t.isHub, isStation: t.isStation, trade: net?.trade),
+      if (siege != null) ...[
+        const SizedBox(height: 6),
+        _StatusLine(
+          Palette.hostile,
+          'Under siege since ${clockTime(siege)}: the next raid that breaks it takes it. '
+          'Repair it${supplier != null ? ', or let the hub mend it to 100%,' : ''} to lift the siege.',
+        ),
+      ],
       if (mine) const SizedBox(height: 12),
       if (mine) _Stats(game: game, t: t) else _RivalStats(game: game, t: t),
       if (mine) ...[
@@ -466,12 +483,109 @@ class _SupplyLine extends StatelessWidget {
             : isStation
                 ? (Palette.mint, 'Station turf: runs on its own at 70% until a hub covers it')
                 : (Palette.amber, 'No hub in reach: 40% output, wears down and draws raids');
-    return Row(
-      children: [
-        Container(width: 8, height: 8, decoration: BoxDecoration(color: c, boxShadow: [BoxShadow(color: c, blurRadius: 6)])),
-        const SizedBox(width: 8),
-        Expanded(child: Text(text, style: TextStyles.body.copyWith(color: c))),
-      ],
+    return _StatusLine(c, text);
+  }
+}
+
+class _StatusLine extends StatelessWidget {
+  const _StatusLine(this.color, this.text);
+  final Color color;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(color: color, boxShadow: [BoxShadow(color: color, blurRadius: 6)]),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Text(text, style: TextStyles.body.copyWith(color: color))),
+        ],
+      );
+}
+
+/// What this turf puts in your pocket every hour, and what makes it so.
+class _Supplies extends StatelessWidget {
+  const _Supplies({required this.game, required this.t});
+  final GameController game;
+  final Turf t;
+
+  static String _x(double v) => 'x${v.toStringAsFixed(2)}';
+
+  List<(String, Color)> _factors(TurfYield y) => [
+        if (y.lockdown != 1) (y.lockdown == 0 ? 'Lockdown: frozen' : 'Lockdown ${_x(y.lockdown)}', Palette.hostile),
+        if (y.supply != 1) (t.isStation ? 'No hub, station ${_x(y.supply)}' : 'No hub ${_x(y.supply)}', Palette.amber),
+        if (y.garrison != 1) ('Garrison ${_x(y.garrison)}', Palette.mint),
+        if (y.hub != 1) ('Hub ${_x(y.hub)}', Palette.amber),
+        if (y.trade != 1) ('Trade ${_x(y.trade)}', Palette.amber),
+        if (y.aura != 1) ('Hub modules ${_x(y.aura)}', Palette.mint),
+        if (y.modules != 1) ('Modules ${_x(y.modules)}', Palette.mint),
+        if (y.level != 1) ('Level ${_x(y.level)}', Palette.textDim),
+        if (y.station != 1) ('Station ${_x(y.station)} cr', Palette.amber),
+        if (y.surge != 1) ('Surge ${_x(y.surge)}', Palette.mint),
+        if (y.market != 1) ('Market ${_x(y.market)} cr', y.market > 1 ? Palette.mint : Palette.hostile),
+        if (y.vaultCredits != 1) ('Vault ${_x(y.vaultCredits)} cr', Palette.textDim),
+        if (y.vaultLogistics != 1) ('Vault ${_x(y.vaultLogistics)} mat, int', Palette.textDim),
+        if (!y.flat.isZero)
+          ('Modules +${fmtNum(y.flat.materials)} mat +${fmtNum(y.flat.intel)} int', Palette.mint),
+      ];
+
+  @override
+  Widget build(BuildContext context) {
+    final ix = game.index;
+    final y = ix.turfHourly[t.id] ?? const Resources();
+    final parts = ix.turfYield[t.id];
+    Widget cell(String label, double v, Color c) => Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Eyebrow(label),
+              const SizedBox(height: 3),
+              Text('+${fmtNum(v)}', style: TextStyles.data.copyWith(color: c, fontSize: 18)),
+              Text('${fmtNum(v * 24)} a day', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyles.dataSmall),
+            ],
+          ),
+        );
+    final factors = parts == null ? const <(String, Color)>[] : _factors(parts);
+    return Panel(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      border: Palette.amber.withValues(alpha: 0.3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Eyebrow('This turf supplies you, per hour', color: Palette.amber),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              cell('Credits', y.credits, Palette.amber),
+              cell('Materials', y.materials, Palette.text),
+              cell('Intel', y.intel, Palette.ice),
+            ],
+          ),
+          if (parts != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              '${t.biome.label} ground gives ${fmtNum(parts.base.credits)} cr · ${fmtNum(parts.base.materials)} mat · '
+              '${fmtNum(parts.base.intel)} int${factors.isEmpty ? '' : ', then:'}',
+              style: TextStyles.bodyDim.copyWith(fontSize: 12),
+            ),
+            if (factors.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [for (final (label, color) in factors) TagChip(label, color: color)],
+              ),
+            ],
+          ],
+        ],
+      ),
     );
   }
 }
@@ -484,19 +598,16 @@ class _Stats extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ix = game.index;
-    final y = ix.turfHourly[t.id] ?? const Resources();
     final def = ix.turfDefense[t.id] ?? 0;
     final integ = t.integrity.clamp(0, 100) / 100;
     final integColor = integ > 0.6 ? Palette.mint : (integ > 0.3 ? Palette.amber : Palette.hostile);
     final hub = ix.hubs[t.id];
     return Column(
       children: [
+        _Supplies(game: game, t: t),
+        const SizedBox(height: 12),
         Row(
           children: [
-            Expanded(
-              child: StatCell('Yield /h', fmtNum(y.credits),
-                  color: Palette.amber, sub: '${fmtNum(y.materials)} mat · ${fmtNum(y.intel)} int'),
-            ),
             Expanded(child: StatCell('Defense', fmtNum(def), sub: 'garrison L${t.garrison}')),
             Expanded(
               child: Column(
@@ -570,7 +681,7 @@ class _Sockets extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final count = socketCount(t);
+    final count = game.world.socketsOf(t);
     final mods = {for (final m in game.world.modulesOn(t.id)) m.socket: m};
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -587,6 +698,7 @@ class _Sockets extends StatelessWidget {
                 onTap: () =>
                     mods[i] == null ? showModulePicker(context, game, t.id) : showModuleDetail(context, game, mods[i]!),
               ),
+            _AddSocketTile(onTap: () => showSocketSheet(context, game, t)),
           ],
         ),
       ],
@@ -634,6 +746,29 @@ class _SocketTile extends StatelessWidget {
       ),
     );
   }
+}
+
+class _AddSocketTile extends StatelessWidget {
+  const _AddSocketTile({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 150,
+          height: 48,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: ShapeDecoration(shape: chamfer(7, Palette.amber.withValues(alpha: 0.6))),
+          child: Row(
+            children: [
+              const Icon(Icons.add_box_outlined, size: 16, color: Palette.amber),
+              const SizedBox(width: 6),
+              Text('BUY A SOCKET', style: TextStyles.label.copyWith(color: Palette.amber)),
+            ],
+          ),
+        ),
+      );
 }
 
 String _modStats(Module m) {
@@ -704,6 +839,32 @@ Future<void> showRename(BuildContext context, GameController game, Turf t) {
         ),
         const SizedBox(height: 12),
         CommandButton(label: 'Save name', onPressed: () => submit(ctx)),
+      ]);
+}
+
+Future<void> showSocketSheet(BuildContext context, GameController game, Turf t) {
+  final q = game.actions.socketQuote(t.id);
+  final now = game.world.socketsOf(t);
+  return _sheet(context, 'Buy a socket', (ctx) => [
+        Text(
+          'One more module socket on ${t.name}, for good ($now now). '
+          'No ceiling: each extra socket on the same turf costs double the last. Also in Crew > Trade.',
+          style: TextStyles.bodyDim,
+        ),
+        const SizedBox(height: 12),
+        CommandButton(
+          label: 'Add a socket',
+          tone: Tone.amber,
+          icon: Icons.add_box_outlined,
+          cost: q.cost,
+          have: game.player,
+          onPressed: q.allowed
+              ? () {
+                  Navigator.pop(ctx);
+                  game.run((a, now) => a.expandSocket(t.id, now));
+                }
+              : null,
+        ),
       ]);
 }
 

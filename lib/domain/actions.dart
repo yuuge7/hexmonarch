@@ -53,8 +53,8 @@ class PrestigeStatus {
   bool get ready => hexesMet && districtsMet && capitalMet;
 }
 
-/// Player commands. Everything territorial is physical: you plant, breach and
-/// collect at the spot you are standing on.
+/// Player commands. Territory is physical, Turf Wars style: you plant, breach
+/// and collect around the spot you stand on, and around every turf you hold.
 class Commands {
   Commands(this.w);
   final World w;
@@ -90,20 +90,57 @@ class Commands {
     return !w.turfs.values.any((t) => t.isPlayer && t.isStation && t.name.toLowerCase().startsWith(key));
   }
 
+  // ------------------------------------------------------------ reach
+
+  /// Your nearest turf within [rangeM] of a point. Plants, breaches and
+  /// pickups reach out from every turf you hold, not only from where you
+  /// stand.
+  Turf? reachTurf(double lat, double lng, double rangeM) {
+    Turf? best;
+    var bestM = double.infinity;
+    for (final t in w.turfsNear(lat, lng, rangeM)) {
+      if (!t.isPlayer) continue;
+      final d = metersBetween(lat, lng, t.lat, t.lng);
+      if (d < bestM) {
+        bestM = d;
+        best = t;
+      }
+    }
+    return best;
+  }
+
+  /// How far a turf of yours reaches for breaches and pickups: the plant
+  /// range, plus Deep Reach.
+  double get turfStrikeRangeM => w.perks.plantRangeM + w.perks.reachM;
+
   // ------------------------------------------------------------ claim
 
   /// GPS wobble allowance when checking the plant range.
   static const kPlantSlackM = 15.0;
 
-  /// Can a new turf be planted at this point? [fromLat]/[fromLng] is where the
-  /// player stands; the point must be inside their plant range.
-  Quote claimQuote(double lat, double lng, {double? fromLat, double? fromLng}) {
+  /// The turf of yours a plant at this point would reach out from, when the
+  /// player is not in range on foot.
+  Turf? claimVia(double lat, double lng, {double? fromLat, double? fromLng}) {
+    final range = w.perks.plantRangeM;
+    if (fromLat != null && fromLng != null && metersBetween(fromLat, fromLng, lat, lng) <= range + kPlantSlackM) {
+      return null;
+    }
+    return reachTurf(lat, lng, range);
+  }
+
+  /// Can a new turf be planted at this point? With no arguments the player is
+  /// standing on it. A [remote] point (tapped on the map) must be inside the
+  /// plant range of the player at [fromLat]/[fromLng] or of one of their turfs.
+  Quote claimQuote(double lat, double lng, {double? fromLat, double? fromLng, bool remote = false}) {
     final fx = w.perks;
-    if (fromLat != null && fromLng != null) {
-      final away = metersBetween(fromLat, fromLng, lat, lng);
-      if (away > fx.plantRangeM + kPlantSlackM) {
+    if (remote || (fromLat != null && fromLng != null)) {
+      final range = fx.plantRangeM;
+      final away = fromLat == null || fromLng == null ? null : metersBetween(fromLat, fromLng, lat, lng);
+      final onFoot = away != null && away <= range + kPlantSlackM;
+      if (!onFoot && reachTurf(lat, lng, range) == null) {
         return Quote.blocked('Out of plant range',
-            note: '${away.round()} m away · your range is ${fx.plantRangeM.round()} m');
+            note: '${away == null ? '' : '${away.round()} m from you · '}no turf of yours within ${range.round()} m · '
+                'Long Arm (Crew > Perks) reaches farther');
       }
     }
     final spacing = fx.spacingM;
@@ -124,8 +161,9 @@ class Commands {
     bool isStation = false,
     double? fromLat,
     double? fromLng,
+    bool remote = false,
   }) {
-    final q = claimQuote(lat, lng, fromLat: fromLat, fromLng: fromLng);
+    final q = claimQuote(lat, lng, fromLat: fromLat, fromLng: fromLng, remote: remote);
     if (q.blocker != null) return Outcome.fail(q.note ?? q.blocker!);
     if (!q.affordable) return const Outcome.fail('Not enough funds');
     final t = w.makeTurf(
@@ -166,12 +204,19 @@ class Commands {
 
   double breachRangeM(Turf t) => turfRadiusM(t) + kBreachSlackM + w.perks.reachM;
 
+  bool _insideForBreach(Turf t, double? lat, double? lng) =>
+      lat != null && lng != null && metersBetween(lat, lng, t.lat, t.lng) <= breachRangeM(t);
+
+  /// The turf of yours a breach on [t] would be launched from, when the
+  /// player is not standing inside [t].
+  Turf? breachVia(Turf t, double? lat, double? lng) =>
+      _insideForBreach(t, lat, lng) ? null : reachTurf(t.lat, t.lng, turfStrikeRangeM);
+
   Quote breachQuote(Turf t, double? lat, double? lng) {
     if (!t.isHostile) return const Quote.blocked('No hostile presence');
-    if (lat == null || lng == null) return const Quote.blocked('No GPS fix');
-    final d = metersBetween(lat, lng, t.lat, t.lng);
-    if (d > breachRangeM(t)) {
-      return Quote.blocked('Get inside the turf', note: '${fmtKm((d - turfRadiusM(t)) / 1000)} to its edge');
+    if (!_insideForBreach(t, lat, lng) && reachTurf(t.lat, t.lng, turfStrikeRangeM) == null) {
+      return Quote.blocked('Out of reach',
+          note: 'Walk into it, or hold a turf within ${turfStrikeRangeM.round()} m of it');
     }
     final base = claimCost(w.index.owned, discount: _discount);
     return _q(Cost(credits: base.credits * 1.5, intel: 5.0 * _tier),
@@ -226,6 +271,7 @@ class Commands {
       ..integrity = 70
       ..capturedAt = now
       ..lastTick = now;
+    w.liftSiege(mine.id);
     var loot = '';
     if (rng.chance(0.6)) {
       final m = dropModule(w, rng, now, minRarity: Rarity.uncommon);
@@ -269,6 +315,7 @@ class Commands {
     if (!q.allowed) return Outcome.fail(q.blocker ?? 'Not enough materials');
     _pay(q.cost);
     final t = w.turfs[id]!..integrity = 100;
+    w.liftSiege(id);
     w.markTurf(t);
     w.reindex();
     return const Outcome(true, 'Structure restored', Buzz.click);
@@ -412,10 +459,29 @@ class Commands {
 
   int freeSocket(Turf t) {
     final used = {for (final m in w.modulesOn(t.id)) m.socket};
-    for (var i = 0; i < socketCount(t); i++) {
+    for (var i = 0; i < w.socketsOf(t); i++) {
       if (!used.contains(i)) return i;
     }
     return -1;
+  }
+
+  /// One more module socket on a turf, bought outright. No ceiling: each one
+  /// on the same turf costs double the last.
+  Quote socketQuote(String id) {
+    final t = w.turfs[id];
+    if (t == null || !t.isPlayer) return const Quote.blocked('Not your turf');
+    return _q(socketExpandCost(w.extraSockets(id), discount: _discount));
+  }
+
+  Outcome expandSocket(String id, int now) {
+    final q = socketQuote(id);
+    if (!q.allowed) return Outcome.fail(q.blocker ?? 'Not enough funds');
+    _pay(q.cost);
+    final t = w.turfs[id]!;
+    w.addSocket(id);
+    w.revision++;
+    w.log(now, 'gain', 'Socket added at ${t.name} · ${w.socketsOf(t)} sockets');
+    return Outcome(true, '${t.name} now has ${w.socketsOf(t)} sockets', Buzz.surge);
   }
 
   Outcome install(String moduleId, String turfId, int now) {
@@ -424,7 +490,7 @@ class Commands {
     final idx = w.stash.indexWhere((m) => m.id == moduleId);
     if (idx < 0) return const Outcome.fail('Module not in stash');
     final socket = freeSocket(t);
-    if (socket < 0) return const Outcome.fail('No free socket — upgrade to add sockets');
+    if (socket < 0) return const Outcome.fail('No free socket: add one on the turf or in Crew > Trade');
     final m = w.stash.removeAt(idx)
       ..hexId = turfId
       ..socket = socket;
@@ -504,6 +570,16 @@ class Commands {
   double eventRangeM(EventType type) =>
       (type == EventType.convoy ? kConvoyRangeM : kDropRangeM) + w.perks.reachM;
 
+  /// The turf of yours a convoy or dead drop can be grabbed from, when the
+  /// player is not close enough on foot.
+  Turf? eventVia(WorldEvent e, double? lat, double? lng) {
+    if (e.type != EventType.convoy && e.type != EventType.deadDrop) return null;
+    final d = eventDistanceM(e, lat, lng);
+    if (d != null && d <= eventRangeM(e.type)) return null;
+    final elat = e.lat ?? w.turfs[e.target]?.lat, elng = e.lng ?? w.turfs[e.target]?.lng;
+    return elat == null || elng == null ? null : reachTurf(elat, elng, turfStrikeRangeM);
+  }
+
   Quote eventQuote(String eventId, double? lat, double? lng) {
     final e = _event(eventId);
     if (e == null) return const Quote.blocked('Event expired');
@@ -518,7 +594,10 @@ class Commands {
       case EventType.deadDrop:
         final range = eventRangeM(e.type);
         final d = eventDistanceM(e, lat, lng);
-        if (d == null || d > range) return Quote.blocked('Get within ${range.round()} m');
+        if ((d == null || d > range) && eventVia(e, lat, lng) == null) {
+          return Quote.blocked('Get within ${range.round()} m',
+              note: 'or hold a turf within ${turfStrikeRangeM.round()} m of it');
+        }
         return _q(e.type == EventType.convoy ? interceptCost(_tier) : const Cost());
       case EventType.offensive:
         if (e.payload['fortified'] == true) return const Quote.blocked('Already fortified');
@@ -579,6 +658,41 @@ class Commands {
       case EventType.market:
         return const Outcome.fail('Passive modifier');
     }
+  }
+
+  // ------------------------------------------------------------ exchange
+
+  /// What the empire produces per hour, priced in credits.
+  double get hourlyValue {
+    final h = w.index.hourly;
+    return h.credits + h.materials * goodValue(Good.materials) + h.intel * goodValue(Good.intel);
+  }
+
+  /// Credits' worth the exchange moves per day, and what is left of it today.
+  double get tradeCap => tradeDailyCap(p.level, hourlyValue);
+  double tradeLeft(int now) => math.max(0, tradeCap - w.tradeUsed(now ~/ kDay));
+
+  /// Units of [to] received for one unit of [from], after the fence's cut.
+  double tradeRate(Good from, Good to) => goodValue(from) / goodValue(to) * (1 - kTradeFee);
+
+  /// The most of [from] that can be traded right now: what you hold, up to
+  /// what is left of today's limit.
+  double tradeMax(Good from, int now) => math.min(p.have(from), tradeLeft(now) / goodValue(from));
+
+  Outcome trade(Good from, Good to, double amount, int now) {
+    if (from == to) return const Outcome.fail('Pick two different goods');
+    if (amount <= 0) return const Outcome.fail('Nothing to trade');
+    if (p.have(from) + 1e-9 < amount) return Outcome.fail('Not enough ${from.label.toLowerCase()}');
+    final value = amount * goodValue(from);
+    if (value > tradeLeft(now) + 1e-6) {
+      return const Outcome.fail("Over today's limit: it grows with your level and your hourly output");
+    }
+    final got = amount * tradeRate(from, to);
+    p.add(from, -amount);
+    p.add(to, got);
+    w.addTradeUsed(now ~/ kDay, value);
+    w.log(now, 'info', 'Traded ${fmtNum(amount)} ${from.unit} for ${fmtNum(got)} ${to.unit}');
+    return Outcome(true, '+${fmtNum(got)} ${to.unit} for ${fmtNum(amount)} ${from.unit}', Buzz.click);
   }
 
   // ------------------------------------------------------------ perks
@@ -716,6 +830,7 @@ class Commands {
     w.factionsDirty = true;
     w.clearGenomeCache();
     w.clearRazed();
+    w.clearTurfExtras();
     w.reindex();
     w.log(now, 'event', 'NETWORK LIQUIDATED · +${s.keys} Offshore Cryptokeys. New city, new genetics. Rebuild.');
     return Outcome(true, '+${s.keys} Cryptokeys secured offshore', Buzz.surge);

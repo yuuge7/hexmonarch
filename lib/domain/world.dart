@@ -10,10 +10,13 @@ import 'perks.dart';
 import 'vault.dart';
 
 class LogEntry {
-  const LogEntry(this.ts, this.kind, this.message);
+  const LogEntry(this.ts, this.kind, this.message, {this.alert});
   final int ts;
   final String kind; // info | gain | loss | event | system
   final String message;
+
+  /// Set on lines worth a notification: its title.
+  final String? alert;
 }
 
 /// Entire mutable game state held in memory. The simulator and actions mutate
@@ -144,7 +147,84 @@ class World {
     player.settings.remove(kRazedKey);
   }
 
-  void log(int ts, String kind, String message) => pendingLog.add(LogEntry(ts, kind, message));
+  void log(int ts, String kind, String message, {String? alert}) =>
+      pendingLog.add(LogEntry(ts, kind, message, alert: alert));
+
+  // ------------------------------------------------------------- sieges
+
+  /// When the player last had the game open. A save from before this existed
+  /// counts its last sync.
+  int get seenAt => (player.settings[kSeenKey] as num?)?.toInt() ?? player.lastSync;
+
+  /// Call once the simulation has caught up to [now] with the game on screen.
+  void markSeen(int now) => player.settings[kSeenKey] = now;
+
+  Map<String, dynamic> _bag(String key) {
+    final v = player.settings[key];
+    if (v is Map<String, dynamic>) return v;
+    return player.settings[key] = <String, dynamic>{if (v is Map) ...v.cast<String, dynamic>()};
+  }
+
+  /// Time of the first hit a turf took that has not been repaired since.
+  int? siegeSince(String turfId) => ((player.settings[kSiegeKey] as Map?)?[turfId] as num?)?.toInt();
+
+  void besiege(Turf t, int ts) => _bag(kSiegeKey).putIfAbsent(t.id, () => ts);
+
+  void liftSiege(String turfId) => (player.settings[kSiegeKey] as Map?)?.remove(turfId);
+
+  /// Rivals may only seize a turf the player has seen wounded: it took its
+  /// first hit before the game was last opened. A turf can never be hit for
+  /// the first time and lost within one absence.
+  bool exposed(Turf t) {
+    final since = siegeSince(t.id);
+    return since != null && since < seenAt;
+  }
+
+  // ------------------------------------------------------------- bought sockets
+
+  int extraSockets(String turfId) => ((player.settings[kSocketsKey] as Map?)?[turfId] as num?)?.toInt() ?? 0;
+
+  int socketsOf(Turf t) => socketCount(t) + extraSockets(t.id);
+
+  void addSocket(String turfId) => _bag(kSocketsKey)[turfId] = extraSockets(turfId) + 1;
+
+  /// Forgets everything kept per turf outside the turf rows.
+  void forgetTurf(String turfId) {
+    liftSiege(turfId);
+    (player.settings[kSocketsKey] as Map?)?.remove(turfId);
+  }
+
+  void clearTurfExtras() {
+    player.settings.remove(kSiegeKey);
+    player.settings.remove(kSocketsKey);
+  }
+
+  // ------------------------------------------------------------- exchange
+
+  /// Credits' worth already traded on in-game day [day].
+  double tradeUsed(int day) {
+    final v = player.settings[kTradeKey];
+    if (v is List && v.length >= 2 && (v[0] as num).toInt() == day) return (v[1] as num).toDouble();
+    return 0;
+  }
+
+  void addTradeUsed(int day, double value) => player.settings[kTradeKey] = [day, tradeUsed(day) + value];
+
+  /// Independent copy for dry runs (the alert forecast). Shares only the grid.
+  World clone() => World(
+        grid: grid,
+        player: player.copy(),
+        turfs: {for (final t in turfs.values) t.id: t.copy()},
+        installed: {
+          for (final e in installed.entries) e.key: [for (final m in e.value) m.copy()],
+        },
+        stash: [for (final m in stash) m.copy()],
+        events: [for (final e in events) e.copy()],
+        factions: [for (final f in factions) f.copy()],
+        vaultRanks: Map.of(vaultRanks),
+        perkRanks: Map.of(perkRanks),
+        jobRuns: Map.of(jobRuns),
+      );
 
   // ------------------------------------------------------------- genetics
 
@@ -302,6 +382,70 @@ class RazedSpot {
 const kRazedKey = 'razed';
 const kRazedMax = 400;
 
+/// Keys in the player's settings: small state that travels with the save.
+const kSeenKey = 'seen';
+const kSiegeKey = 'siege';
+const kSocketsKey = 'sockets';
+const kTradeKey = 'trade';
+
+/// Why a turf pays what it pays: its base output and every multiplier on it.
+class TurfYield {
+  const TurfYield({
+    required this.base,
+    required this.garrison,
+    required this.modules,
+    required this.level,
+    required this.hub,
+    required this.trade,
+    required this.aura,
+    required this.supply,
+    required this.lockdown,
+    required this.surge,
+    required this.station,
+    required this.market,
+    required this.vaultCredits,
+    required this.vaultLogistics,
+    required this.flat,
+  });
+
+  /// Neighbourhood type times anomaly, per hour, before any multiplier.
+  final Resources base;
+  final double garrison;
+  final double modules;
+  final double level;
+  final double hub;
+
+  /// Network trade multiplier (1 without a hub).
+  final double trade;
+
+  /// Yield modules on the supplying hub.
+  final double aura;
+
+  /// 1 when a hub supplies it, else the hub-less share.
+  final double supply;
+
+  /// 1, the rerouted trickle, or 0 while the district is locked down.
+  final double lockdown;
+  final double surge;
+
+  /// Credits only: station bonus and the street market.
+  final double station;
+  final double market;
+  final double vaultCredits;
+  final double vaultLogistics;
+
+  /// Flat output of forge and siphon modules.
+  final Resources flat;
+
+  double get _k => garrison * modules * level * hub * trade * aura * supply * lockdown;
+
+  Resources get total => Resources(
+        credits: base.credits * _k * surge * station * vaultCredits * market,
+        materials: base.materials * _k * surge * vaultLogistics + flat.materials,
+        intel: base.intel * _k * surge * vaultLogistics + flat.intel,
+      );
+}
+
 class HubStats {
   HubStats(this.hub);
   final Turf hub;
@@ -338,6 +482,7 @@ class WorldIndex {
   final hubs = <String, HubStats>{};
   final networks = <NetworkStats>[];
   final turfHourly = <String, Resources>{};
+  final turfYield = <String, TurfYield>{};
   final turfDefense = <String, double>{};
   final lockedDistricts = <String>{};
   final raidTargets = <String>[];
@@ -503,29 +648,37 @@ class WorldIndex {
       final net = hubS == null ? null : ix.networks[hubS.network];
       final m = mods[t.id];
 
-      var k = garrisonYieldMult(t.garrison) * (1 + (m?.cash ?? 0)) * lvlMult;
-      if (t.isHub) k *= hubYieldMult(t.hubLevel);
-      if (supplied) {
-        k *= net!.trade;
-        if (hubS.hub.id != t.id) k *= 1 + hubS.cashAura;
-      } else {
-        k *= t.isStation ? kStationSoloYield : kUnsuppliedYield;
-      }
       final locked = ix.lockedDistricts.contains(t.district);
-      if (locked) {
-        k *= (net != null && net.districts.length > 1) ? kLockdownReroute : 0;
-      }
       final base = biomeYield(t.biome);
       final an = anomalyYieldMult(t.anomaly);
-      final surge = ix.surgeBiome == t.biome ? 2.0 : 1.0;
-      final station = t.isStation ? kStationCreditBonus : 1.0;
-      final y = Resources(
-        credits: base.credits * an.credits * k * surge * station * vault.creditMult * ix.creditMarket,
-        materials: base.materials * an.materials * k * surge * vault.logisticsMult +
-            (locked ? 0 : (m?.perks[Perk.materialForge] ?? 0)),
-        intel: base.intel * an.intel * k * surge * vault.logisticsMult +
-            (locked ? 0 : (m?.perks[Perk.intelSiphon] ?? 0)),
+      final parts = TurfYield(
+        base: Resources(
+          credits: base.credits * an.credits,
+          materials: base.materials * an.materials,
+          intel: base.intel * an.intel,
+        ),
+        garrison: garrisonYieldMult(t.garrison),
+        modules: 1 + (m?.cash ?? 0),
+        level: lvlMult,
+        hub: t.isHub ? hubYieldMult(t.hubLevel) : 1,
+        trade: supplied ? net!.trade : 1,
+        aura: supplied && hubS.hub.id != t.id ? 1 + hubS.cashAura : 1,
+        supply: supplied ? 1 : (t.isStation ? kStationSoloYield : kUnsuppliedYield),
+        lockdown: !locked ? 1 : ((net != null && net.districts.length > 1) ? kLockdownReroute : 0),
+        surge: ix.surgeBiome == t.biome ? 2.0 : 1.0,
+        station: t.isStation ? kStationCreditBonus : 1.0,
+        market: ix.creditMarket,
+        vaultCredits: vault.creditMult,
+        vaultLogistics: vault.logisticsMult,
+        flat: locked
+            ? const Resources()
+            : Resources(
+                materials: m?.perks[Perk.materialForge] ?? 0,
+                intel: m?.perks[Perk.intelSiphon] ?? 0,
+              ),
       );
+      final y = parts.total;
+      ix.turfYield[t.id] = parts;
       ix.turfHourly[t.id] = y;
       total = total + y;
 
