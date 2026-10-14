@@ -304,7 +304,7 @@ class PlayerData {
     required this.blueprints,
     required this.liquidations,
     required this.lifetimeCredits,
-    required this.lastEventDay,
+    required this.lastEventHour,
     required this.heat,
     required this.createdAt,
     required this.settings,
@@ -328,7 +328,10 @@ class PlayerData {
   int blueprints;
   int liquidations;
   double lifetimeCredits;
-  int lastEventDay;
+  /// Hour index (ms / kHour) of the last Event Deck wave. Stored in the
+  /// last_event_day column, which held a day index before 0.6: any hour
+  /// index is larger, so an old save simply deals its next wave.
+  int lastEventHour;
   double heat;
   int createdAt;
   Map<String, dynamic> settings;
@@ -371,7 +374,7 @@ class PlayerData {
         blueprints: blueprints,
         liquidations: liquidations,
         lifetimeCredits: lifetimeCredits,
-        lastEventDay: lastEventDay,
+        lastEventHour: lastEventHour,
         heat: heat,
         createdAt: createdAt,
         settings: (jsonDecode(jsonEncode(settings)) as Map).cast<String, dynamic>(),
@@ -397,6 +400,9 @@ class Cost {
   final double credits;
   final double materials;
   final double intel;
+
+  Cost operator *(double k) => Cost(credits: credits * k, materials: materials * k, intel: intel * k);
+  Cost operator +(Cost o) => Cost(credits: credits + o.credits, materials: materials + o.materials, intel: intel + o.intel);
 
   bool affordable(PlayerData p) =>
       p.credits + 1e-9 >= credits && p.materials + 1e-9 >= materials && p.intel + 1e-9 >= intel;

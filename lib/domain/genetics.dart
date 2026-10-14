@@ -1,4 +1,5 @@
 import '../core/rng.dart';
+import 'balance.dart';
 import 'models.dart';
 
 /// Procedural Hex Genetics. Attributes are a pure function of the H3 index of
@@ -20,7 +21,8 @@ class RivalSpawn {
 }
 
 const kAnomalyChance = 0.15;
-const kPresetRivalChance = 0.09;
+/// Share of blocks with a day-one rival turf (0.09 before 0.6).
+const kPresetRivalChance = 0.12;
 
 const _biomeWeights = {
   Biome.commercial: 0.40,
@@ -65,11 +67,25 @@ Genome genomeFor(String cell, String neighborhood, int worldSeed) {
   return Genome(biome: biome, anomaly: anomaly);
 }
 
+/// Which faction holds a day-one rival turf, weighted by its spawn share.
+int _spawnFaction(double u) {
+  var total = 0.0;
+  for (final f in kFactionProfiles) {
+    total += f.spawn;
+  }
+  var acc = 0.0;
+  for (var i = 0; i < kFactionProfiles.length; i++) {
+    acc += kFactionProfiles[i].spawn / total;
+    if (u < acc) return i;
+  }
+  return kFactionProfiles.length - 1;
+}
+
 RivalSpawn? rivalSpawnFor(String block, int worldSeed) {
   final h = mix64(fnv1a64(block) ^ worldSeed ^ 0x51A7C0DE);
   if (unitFromHash(h) >= kPresetRivalChance) return null;
   return RivalSpawn(
-    faction: (mix64(h ^ 0x6) >>> 7) % 3,
+    faction: _spawnFaction(unitFromHash(mix64(h ^ 0x6))),
     bearing: unitFromHash(mix64(h ^ 0x7)) * 6.283185307179586,
     distanceM: 15 + unitFromHash(mix64(h ^ 0x8)) * 95,
   );

@@ -84,7 +84,7 @@ PlayerData freshPlayer({int seed = 42, int now = 0}) => PlayerData(
       blueprints: 0,
       liquidations: 0,
       lifetimeCredits: 0,
-      lastEventDay: now ~/ kDay,
+      lastEventHour: now ~/ kHour,
       heat: 0,
       createdAt: now,
       settings: {},
@@ -98,7 +98,7 @@ World freshWorld({int seed = 42, int now = 0}) => World(
       stash: [],
       events: [],
       factions: [
-        for (var i = 0; i < 3; i++) Faction(id: 'rival$i', archetype: i, aggression: 1.0),
+        for (var i = 0; i < kFactionProfiles.length; i++) Faction(id: 'rival$i', archetype: i, aggression: 1.0),
       ],
       vaultRanks: {},
     );

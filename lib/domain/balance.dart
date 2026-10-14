@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import '../core/rng.dart';
 import 'models.dart';
 
 // Every tunable number lives here. Growth curves are exponential on both the
@@ -173,6 +174,40 @@ double threatPower({
       (1 + 0.25 * liquidations);
 }
 
+// ---------------------------------------------------------------- factions
+
+/// One rival faction's character. [grit] scales its strength, both when it
+/// raids and when its turfs are breached; [spawn] is its share of the
+/// day-one rival turfs; [raids] scales how often it raids you. The first three are the original factions, the
+/// other three joined in 0.6: Corner Boys are weak and everywhere, the
+/// Scrappers a little tougher, the Old Firm hard and rare but always pays
+/// out a Rare module or better.
+class FactionProfile {
+  const FactionProfile(this.grit, this.spawn, this.minAggression, this.maxAggression, {this.raids = 1});
+  final double grit;
+  final double spawn;
+  final double raids;
+  final double minAggression;
+  final double maxAggression;
+
+  double rollAggression(Rng rng) => rng.range(minAggression, maxAggression);
+}
+
+const kFactionProfiles = [
+  FactionProfile(1.0, 1.0, 0.75, 1.3),
+  FactionProfile(1.0, 1.0, 0.75, 1.3),
+  FactionProfile(1.0, 1.0, 0.75, 1.3),
+  // The newer three raid half as often: more rivals to hit, not twice the raids.
+  FactionProfile(0.55, 1.6, 0.5, 0.8, raids: 0.5),
+  FactionProfile(0.75, 1.3, 0.6, 0.95, raids: 0.5),
+  FactionProfile(1.3, 0.5, 0.8, 1.1, raids: 0.5),
+];
+
+FactionProfile factionProfile(int archetype) => kFactionProfiles[archetype % kFactionProfiles.length];
+
+/// Breaching a faction at least this gritty always loots a Rare or better.
+const kToughGrit = 1.2;
+
 double raidChancePerHour(double aggression, double heat) =>
     math.min(0.8, 0.025 * aggression * (1 + heat));
 
@@ -189,7 +224,28 @@ const kHeatBase = 0.004; // per hour
 const kHeatSecured = 0.012; // per hour at 100% supplied coverage
 const kHeatOffensiveTrigger = 2.5;
 
-double playerStrike(int level, double localHubDef) => 20 + 12.0 * level + 0.5 * localHubDef;
+// ---------------------------------------------------------------- breaching
+
+double levelStrike(int level) => 20 + 12.0 * level;
+
+/// Share of the defense of the strongest hub covering a rival turf that
+/// backs a breach on it.
+const kHubStrikeShare = 0.5;
+
+/// Share of the defense of your best-garrisoned turf within reach of a rival
+/// turf that backs a breach on it.
+const kBackupShare = 0.5;
+
+double playerStrike(int level, double localHubDef) => levelStrike(level) + kHubStrikeShare * localHubDef;
+
+/// Rival turfs defend in proportion to the faction's threat. That threat
+/// follows the hub covering the rival turf, not your best hub anywhere: a
+/// level 20 hub at home does not make rivals 150 km away any harder.
+const kRivalDefMult = 1.0;
+
+/// Integrity a failed breach knocks off the rival turf. A rival turf at 0%
+/// defends at half strength, so every attempt makes the next one easier.
+const kBreachWear = 25.0;
 
 double breachChance(double strike, double enemyDef) =>
     (strike / (strike + enemyDef)).clamp(0.05, 0.95);
@@ -237,6 +293,53 @@ const kTradeFee = 0.25;
 /// Credits' worth of goods the exchange will move in one day. Grows with the
 /// player's level and with what the empire produces per hour.
 double tradeDailyCap(int level, double hourlyValue) => 1000 + 250.0 * (level - 1) + 12 * hourlyValue;
+
+// ---------------------------------------------------------------- event deck
+
+/// Local hours the Event Deck deals cards at. Nothing is dealt at night, so a
+/// card never appears and runs out while the player sleeps. The first wave
+/// of the day is the big one: it can also bring a lockdown, an offensive or
+/// a market swing.
+const kEventWaveHours = [8, 12, 16, 20];
+
+/// Index of [ts] in [kEventWaveHours] in the phone's time zone, or -1.
+int eventWave(int ts) => kEventWaveHours.indexOf(DateTime.fromMillisecondsSinceEpoch(ts).hour);
+
+/// When the next wave is dealt after [now].
+int nextEventWave(int now) {
+  var t = (now ~/ kHour + 1) * kHour;
+  for (var i = 0; i < 48 && eventWave(t) < 0; i++) {
+    t += kHour;
+  }
+  return t;
+}
+
+const kConvoyWindowMs = 6 * kHour;
+const kDropWindowMs = kDay;
+const kSurgeWindowMs = 12 * kHour;
+const kMarketWindowMs = kDay;
+const kOffensiveWindowMs = 10 * kHour;
+
+/// A lockdown lifts by itself after a day.
+const kLockdownMs = kDay;
+
+/// Lifting a lockdown from outside its district costs this much more.
+const kLockdownRemoteMult = 1.5;
+
+/// Field events on the map at once, at most.
+const kMaxConvoys = 3;
+const kMaxDrops = 4;
+
+// ---------------------------------------------------------------- shop boosts
+
+const kHiredGunsStrike = 1.5;
+const kInsideManDefense = 0.7;
+const kBarricadeDefense = 1.5;
+
+// ---------------------------------------------------------------- relays
+
+/// Outgoing relays one hub can hold.
+const kRelayLinksPerHub = 3;
 
 // ---------------------------------------------------------------- offline
 

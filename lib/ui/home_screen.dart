@@ -11,8 +11,11 @@ import '../game/game_controller.dart';
 import '../platform/location_service.dart';
 import 'anomaly_dialog.dart';
 import 'hud.dart';
+import 'map/layers_sheet.dart';
+import 'map/map_layers.dart';
 import 'map/tactical_map.dart';
 import 'panels/crew_panel.dart';
+import 'panels/empire_panel.dart';
 import 'panels/network_panel.dart';
 import 'panels/ops_panel.dart';
 import 'panels/turf_panel.dart';
@@ -23,6 +26,7 @@ import 'widgets/common.dart';
 
 enum ConsoleTab {
   turf('Turf', Icons.hexagon_outlined),
+  empire('Empire', Icons.hive_outlined),
   network('Network', Icons.hub_outlined),
   crew('Crew', Icons.groups_outlined),
   ops('Ops', Icons.radar),
@@ -151,7 +155,10 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor: Palette.carbon,
       body: LayoutBuilder(
         builder: (context, c) {
-          final openH = c.maxHeight * 0.45;
+          // Tall console: most of the screen for reading and managing, a
+          // strip of map on top.
+          final tall = game.player.settings['tallConsole'] == true;
+          final openH = c.maxHeight * (tall ? 0.72 : 0.45);
           final foldedH = _kHeaderH + _kTabBarH + MediaQuery.paddingOf(context).bottom;
           final mapOnly = game.mapOnly;
           _consoleH = mapOnly ? foldedH : openH;
@@ -177,7 +184,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     Positioned(
                       right: 10,
                       bottom: 34,
-                      child: _MapControls(game: game, map: _mapCtl),
+                      // Tall console leaves a short map: the buttons go in a
+                      // row so they clear the status strip.
+                      child: _MapControls(game: game, map: _mapCtl, row: tall && !mapOnly),
                     ),
                     // Soft fade into the console.
                     Positioned(
@@ -225,7 +234,17 @@ class _HomeScreenState extends State<HomeScreen> {
         top: false,
         child: Column(
           children: [
-            _ConsoleHeader(game: game, folded: mapOnly, onFold: () => _setMapOnly(!mapOnly), onTurfList: _openTurfList),
+            _ConsoleHeader(
+              game: game,
+              folded: mapOnly,
+              onFold: () => _setMapOnly(!mapOnly),
+              onTurfList: _openTurfList,
+              onTall: () {
+                final tall = game.player.settings['tallConsole'] == true;
+                unawaited(game.setSetting('tallConsole', !tall));
+                if (mapOnly) _setMapOnly(false);
+              },
+            ),
             Expanded(
               child: ClipRect(
                 child: OverflowBox(
@@ -254,6 +273,7 @@ class _HomeScreenState extends State<HomeScreen> {
       listenable: game,
       builder: (_, _) => TurfPanel(game: game, onLocate: _locate),
     ),
+    ConsoleTab.empire => EmpirePanel(game: game, onTurfList: _openTurfList),
     ConsoleTab.network => ListenableBuilder(
       listenable: game,
       builder: (_, _) => NetworkPanel(game: game, onLocate: _locate, onTurfList: _openTurfList),
@@ -268,8 +288,17 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 class _ConsoleHeader extends StatelessWidget {
-  const _ConsoleHeader({required this.game, required this.folded, required this.onFold, required this.onTurfList});
+  const _ConsoleHeader({
+    required this.game,
+    required this.folded,
+    required this.onFold,
+    required this.onTurfList,
+    required this.onTall,
+  });
   final GameController game;
+
+  /// Switches the console between its normal and its tall height.
+  final VoidCallback onTall;
 
   /// Map-only mode: the console shows this strip and the tab bar, no panel.
   final bool folded;
@@ -335,6 +364,12 @@ class _ConsoleHeader extends StatelessWidget {
                   _IconBtn(icon: Icons.close, tip: 'Back to my position', onTap: () => game.select(null)),
                 _IconBtn(icon: Icons.format_list_bulleted, tip: 'All my turfs', onTap: onTurfList),
                 _IconBtn(
+                  icon: game.player.settings['tallConsole'] == true ? Icons.unfold_less : Icons.unfold_more,
+                  tip: game.player.settings['tallConsole'] == true ? 'Shorter console' : 'Taller console',
+                  active: game.player.settings['tallConsole'] == true && !folded,
+                  onTap: onTall,
+                ),
+                _IconBtn(
                   icon: folded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
                   tip: folded ? 'Open the console' : 'Map only',
                   active: folded,
@@ -352,26 +387,34 @@ class _ConsoleHeader extends StatelessWidget {
 /// View controls that float on the map: sunlight style, frame the empire,
 /// follow me. They sit just above the console, still in thumb reach.
 class _MapControls extends StatelessWidget {
-  const _MapControls({required this.game, required this.map});
+  const _MapControls({required this.game, required this.map, this.row = false});
   final GameController game;
   final TacticalMapController map;
+  final bool row;
 
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: Listenable.merge([game, map]),
-      builder: (context, _) => Column(
+      builder: (context, _) => Flex(
+        direction: row ? Axis.horizontal : Axis.vertical,
         mainAxisSize: MainAxisSize.min,
+        spacing: 8,
         children: [
+          _MapBtn(
+            icon: Icons.layers_outlined,
+            tip: 'Map layers · ${game.layers.mode.title}',
+            // Lit while the map shows anything other than the everyday view.
+            active: game.layers.mode != MapMode.tactical,
+            onTap: () => showMapLayers(context, game),
+          ),
           _MapBtn(
             icon: game.sunMap ? Icons.dark_mode_outlined : Icons.light_mode_outlined,
             tip: game.sunMap ? 'Dark map' : 'White map for sunlight',
             active: game.sunMap,
             onTap: () => game.setSetting('sunMap', !game.sunMap),
           ),
-          const SizedBox(height: 8),
           _MapBtn(icon: Icons.center_focus_strong_outlined, tip: 'Frame my empire', onTap: map.frameEmpire),
-          const SizedBox(height: 8),
           _MapBtn(
             icon: map.follow ? Icons.my_location : Icons.location_searching,
             tip: 'Follow me',

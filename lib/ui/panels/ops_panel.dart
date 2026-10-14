@@ -6,6 +6,7 @@ import '../../domain/balance.dart';
 import '../../game/game_controller.dart';
 import '../widgets/common.dart';
 import '../widgets/event_card.dart';
+import '../widgets/intel.dart';
 
 class OpsPanel extends StatelessWidget {
   const OpsPanel({super.key, required this.game, required this.onLocate});
@@ -27,21 +28,21 @@ class OpsPanel extends StatelessWidget {
                 Expanded(child: Eyebrow('Event deck · ${events.length} active')),
                 const Text('NEXT DEAL ', style: TextStyles.label),
                 Countdown(
-                  remainingMs: () {
-                    final n = game.now;
-                    return (n ~/ kDay + 1) * kDay - n;
-                  },
+                  remainingMs: () => nextEventWave(game.now) - game.now,
                   style: TextStyles.dataSmall.copyWith(color: Palette.amber),
                 ),
               ],
             ),
             const SizedBox(height: 8),
+            DealClock(now: game.now),
+            const SizedBox(height: 8),
             if (events.isEmpty)
               Panel(
                 child: Text(
                   game.index.owned == 0
-                      ? 'The director deals 2-4 cards a day once you hold territory.'
-                      : 'Quiet for now. New cards are dealt every 24h: lockdowns, convoys, dead drops, market swings and offensives.',
+                      ? 'Cards are dealt four times a day once you hold territory: plant your first turf.'
+                      : 'Quiet for now. New cards are dealt at ${kEventWaveHours.map((h) => '${h.toString().padLeft(2, '0')}:00').join(', ')}: '
+                          'convoys, dead drops and surges all day, lockdowns, market swings and offensives in the morning.',
                   style: TextStyles.bodyDim,
                 ),
               ),

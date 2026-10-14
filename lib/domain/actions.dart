@@ -4,10 +4,12 @@ import '../core/format.dart';
 import '../core/rng.dart';
 import '../geo/hex_grid.dart';
 import 'balance.dart';
+import 'empire.dart';
 import 'loot.dart';
 import 'jobs.dart';
 import 'models.dart';
 import 'perks.dart';
+import 'shop.dart';
 import 'simulation.dart';
 import 'tiers.dart';
 import 'vault.dart';
@@ -34,6 +36,34 @@ class Quote {
   final bool affordable;
   final String? note;
   bool get allowed => blocker == null && affordable;
+}
+
+/// Where a breach's strike comes from.
+class StrikeParts {
+  const StrikeParts({
+    required this.level,
+    required this.hub,
+    required this.backup,
+    required this.backupFrom,
+    required this.perk,
+    required this.boost,
+  });
+
+  /// Your level.
+  final double level;
+
+  /// Share of the strongest hub whose supply sphere covers the target.
+  final double hub;
+
+  /// Share of the garrison of your best turf within reach of the target.
+  final double backup;
+  final Turf? backupFrom;
+
+  /// Muscle perk and Hired Guns multipliers.
+  final double perk;
+  final double boost;
+
+  double get total => (level + hub + backup) * perk * boost;
 }
 
 class PrestigeStatus {
@@ -190,15 +220,25 @@ class Commands {
 
   // ------------------------------------------------------------ breach
 
-  /// Strike power at a rival turf: your level plus the strongest hub whose
-  /// supply sphere reaches it.
-  double localStrike(Turf target) {
-    var hubDef = 0.0;
-    for (final s in w.index.hubs.values) {
-      if (w.kmBetween(target, s.hub) <= s.radiusKm) hubDef = math.max(hubDef, s.def);
+  /// Strike power at a rival turf: your level, the strongest hub whose
+  /// supply sphere reaches it, and the best garrison you hold within reach,
+  /// times Muscle and Hired Guns.
+  StrikeParts strikeParts(Turf target) {
+    Turf? backup;
+    for (final t in w.turfsNear(target.lat, target.lng, turfStrikeRangeM)) {
+      if (t.isPlayer && (backup == null || t.garrison > backup.garrison)) backup = t;
     }
-    return playerStrike(p.level, hubDef) * w.perks.strikeMult;
+    return StrikeParts(
+      level: levelStrike(p.level),
+      hub: kHubStrikeShare * (w.coverHub(target)?.def ?? 0),
+      backup: backup == null ? 0 : kBackupShare * garrisonDef(backup.garrison),
+      backupFrom: backup,
+      perk: w.perks.strikeMult,
+      boost: w.boosted(kBoostHiredGuns) ? kHiredGunsStrike : 1,
+    );
   }
+
+  double localStrike(Turf target) => strikeParts(target).total;
 
   double breachOdds(Turf t) => breachChance(localStrike(t), w.enemyDefense(t));
 
@@ -235,10 +275,10 @@ class Commands {
     final odds = breachOdds(t);
     final fname = f == null ? 'Rivals' : factionName(f, p.level);
     if (!rng.chance(odds)) {
-      f?.wins++;
-      w.factionsDirty = true;
-      w.log(now, 'loss', 'Breach on ${t.name} failed against $fname');
-      return Outcome(false, 'Breach failed · $fname held', Buzz.warn);
+      // A failed breach still hurts them, and does not feed their nemesis rank.
+      final left = _wear(t, now).round();
+      w.log(now, 'loss', 'Breach on ${t.name} failed against $fname · their turf down to $left%');
+      return Outcome(false, 'Breach failed · $fname held at $left%', Buzz.warn);
     }
     f?.losses++;
     w.factionsDirty = true;
@@ -273,8 +313,9 @@ class Commands {
       ..lastTick = now;
     w.liftSiege(mine.id);
     var loot = '';
-    if (rng.chance(0.6)) {
-      final m = dropModule(w, rng, now, minRarity: Rarity.uncommon);
+    final tough = f != null && factionProfile(f.archetype).grit >= kToughGrit;
+    if (tough || rng.chance(0.6)) {
+      final m = dropModule(w, rng, now, minRarity: tough ? Rarity.rare : Rarity.uncommon);
       loot = ' · looted ${m.name}';
     }
     w.reindex();
@@ -282,6 +323,20 @@ class Commands {
     final restored = mine.isHub ? ' Hub back online.' : '';
     w.log(now, 'gain', 'Took ${mine.name} from $fname$loot.$restored');
     return Outcome(true, 'Turf seized · ${mine.name}$loot', Buzz.capture);
+  }
+
+  /// Knocks [kBreachWear] integrity off a rival turf and returns what is left.
+  double _wear(Turf t, int now) {
+    var held = w.turfs[t.id];
+    if (held == null) {
+      // Day-one rival turfs are generated, not stored: store a copy to scar.
+      held = w.makeTurf(lat: t.lat, lng: t.lng, name: t.name, owner: t.owner, now: now)..integrity = t.integrity;
+      w.addTurf(held);
+    }
+    held.integrity = math.max(0, held.integrity - kBreachWear);
+    w.markTurf(held);
+    w.revision++;
+    return held.integrity;
   }
 
   // ------------------------------------------------------------ garrison
@@ -402,6 +457,11 @@ class Commands {
     final b = w.index.hubs[toId];
     if (a == null || b == null) return const Quote.blocked('Both ends must be your hubs');
     if (!a.canRelay || !b.canRelay) return const Quote.blocked('Dead Zone: relays cannot lock on');
+    if (w.linked(fromId, toId)) return const Quote.blocked('Already linked');
+    if (w.relayLinks(a.hub).length >= kRelayLinksPerHub) {
+      return const Quote.blocked('All $kRelayLinksPerHub relays in use',
+          note: "Sever one of this hub's relays to free a slot, or link from the other hub");
+    }
     final km = w.kmBetween(a.hub, b.hub);
     if (km > a.relayKm) {
       return Quote.blocked('Out of range: ${fmtKm(km)} > ${fmtKm(a.relayKm)}',
@@ -414,8 +474,8 @@ class Commands {
     final q = relayQuote(fromId, toId);
     if (!q.allowed) return Outcome.fail(q.blocker ?? 'Not enough funds');
     _pay(q.cost);
-    final a = w.turfs[fromId]!..relayTarget = toId;
-    w.markTurf(a);
+    final a = w.turfs[fromId]!;
+    w.addRelayLink(a, toId);
     w.reindex();
     grantXp(w, 150, now);
     final net = w.index.networkOfHub(fromId);
@@ -424,13 +484,12 @@ class Commands {
     return Outcome(true, 'Relay locked$trade', Buzz.capture);
   }
 
-  Outcome severRelay(String fromId, int now) {
+  Outcome severRelay(String fromId, String toId, int now) {
     final a = w.turfs[fromId];
-    if (a == null || a.relayTarget == null) return const Outcome.fail('No relay');
-    a.relayTarget = null;
-    w.markTurf(a);
+    if (a == null || !w.relayLinks(a).contains(toId)) return const Outcome.fail('No relay');
+    w.removeRelayLink(a, toId);
     w.reindex();
-    w.log(now, 'info', 'Relay from ${a.name} severed');
+    w.log(now, 'info', 'Relay ${a.name} ⇄ ${w.turfs[toId]?.name ?? 'hub'} severed');
     return const Outcome(true, 'Relay severed', Buzz.click);
   }
 
@@ -585,11 +644,11 @@ class Commands {
     if (e == null) return const Quote.blocked('Event expired');
     switch (e.type) {
       case EventType.lockdown:
-        if (lat == null || lng == null || w.grid.cellAt(lat, lng, kDistrictRes) != e.district) {
-          return const Quote.blocked('Travel into the district');
-        }
         final n = w.turfs.values.where((t) => t.isPlayer && t.district == e.district).length;
-        return _q(lockdownCost(_tier, n, w.index.districtHourly(w, e.district!)));
+        final base = lockdownCost(_tier, n, w.index.districtHourly(w, e.district ?? ''));
+        if (inDistrict(e, lat, lng)) return _q(base, note: 'In the district: full price');
+        return _q(base * kLockdownRemoteMult,
+            note: 'From afar x$kLockdownRemoteMult · in the district it costs less');
       case EventType.convoy:
       case EventType.deadDrop:
         final range = eventRangeM(e.type);
@@ -608,6 +667,10 @@ class Commands {
         return const Quote.blocked('Passive modifier');
     }
   }
+
+  /// The player stands inside the district a lockdown froze.
+  bool inDistrict(WorldEvent e, double? lat, double? lng) =>
+      lat != null && lng != null && w.grid.cellAt(lat, lng, kDistrictRes) == e.district;
 
   Outcome resolveEvent(String eventId, double? lat, double? lng, int now) {
     final e = _event(eventId);
@@ -693,6 +756,208 @@ class Commands {
     w.addTradeUsed(now ~/ kDay, value);
     w.log(now, 'info', 'Traded ${fmtNum(amount)} ${from.unit} for ${fmtNum(got)} ${to.unit}');
     return Outcome(true, '+${fmtNum(got)} ${to.unit} for ${fmtNum(amount)} ${from.unit}', Buzz.click);
+  }
+
+  // ------------------------------------------------------------ empire (bulk)
+
+  List<Turf> scoped(TurfScope scope) => [
+        for (final t in w.playerTurfs)
+          if (scope.test(t, w.index)) t,
+      ];
+
+  Cost get _purse => Cost(credits: p.credits, materials: p.materials, intel: p.intel);
+
+  /// [withinFunds]: as many of the levels as what you hold pays for.
+  UpgradePlan upgradePlan(Iterable<Turf> turfs, UpgradeKind kind, {int add = 0, int? upTo, bool withinFunds = false}) =>
+      planUpgrades(w, turfs, kind, add: add, upTo: upTo, budget: withinFunds ? _purse : null);
+
+  /// Raises garrisons (or hub levels) on many turfs in one go: [add] levels
+  /// each, or every one below [upTo] up to it.
+  Outcome bulkUpgrade(Iterable<String> ids, UpgradeKind kind, int now,
+      {int add = 0, int? upTo, bool withinFunds = false}) {
+    final turfs = [
+      for (final id in ids)
+        if (w.turfs[id] case final t? when t.isPlayer) t,
+    ];
+    final plan = upgradePlan(turfs, kind, add: add, upTo: upTo, withinFunds: withinFunds);
+    if (plan.wanted == 0) return const Outcome.fail('Nothing to upgrade');
+    if (plan.isEmpty) return const Outcome.fail('Not enough funds for even one level');
+    if (!plan.cost.affordable(p)) return const Outcome.fail('Not enough funds: use Max affordable');
+    _pay(plan.cost);
+    var xp = 0;
+    final promoted = <String>[];
+    for (final e in plan.steps.entries) {
+      final t = w.turfs[e.key]!;
+      if (kind == UpgradeKind.garrison) {
+        for (var k = 0; k < e.value; k++) {
+          t.garrison++;
+          xp += 5 + t.garrison;
+        }
+      } else {
+        final before = hubClass(t.hubLevel);
+        for (var k = 0; k < e.value; k++) {
+          t.hubLevel++;
+          xp += 20 * t.hubLevel;
+        }
+        if (hubClass(t.hubLevel) != before) promoted.add('${t.name} promoted to ${hubClass(t.hubLevel)} class');
+      }
+      w.markTurf(t);
+    }
+    w.reindex();
+    grantXp(w, xp, now);
+    final noun = kind == UpgradeKind.garrison ? 'turf' : 'hub';
+    final many = '${plan.turfs} $noun${plan.turfs == 1 ? '' : 's'}';
+    w.log(now, 'gain',
+        '${kind == UpgradeKind.garrison ? 'Garrisons' : 'Hubs'} raised: +${plan.levels} level${plan.levels == 1 ? '' : 's'} on $many');
+    for (final s in promoted) {
+      w.log(now, 'gain', s);
+    }
+    return Outcome(true, '+${plan.levels} level${plan.levels == 1 ? '' : 's'} on $many', Buzz.surge);
+  }
+
+  Quote repairAllQuote(Iterable<Turf> turfs) {
+    var mats = 0.0, n = 0;
+    for (final t in turfs) {
+      if (!t.isPlayer || t.integrity >= 99.5) continue;
+      mats += repairCost(t).materials;
+      n++;
+    }
+    if (n == 0) return const Quote.blocked('Nothing to repair');
+    return _q(Cost(materials: mats), note: '$n turf${n == 1 ? '' : 's'}');
+  }
+
+  Outcome repairAll(Iterable<String> ids, int now) {
+    final turfs = [
+      for (final id in ids)
+        if (w.turfs[id] case final t? when t.isPlayer && t.integrity < 99.5) t,
+    ];
+    final q = repairAllQuote(turfs);
+    if (!q.allowed) return Outcome.fail(q.blocker ?? 'Not enough materials');
+    _pay(q.cost);
+    for (final t in turfs) {
+      t.integrity = 100;
+      w.liftSiege(t.id);
+      w.markTurf(t);
+    }
+    w.reindex();
+    w.log(now, 'gain', 'Repaired ${turfs.length} turf${turfs.length == 1 ? '' : 's'}');
+    return Outcome(true, '${turfs.length} turf${turfs.length == 1 ? '' : 's'} back to 100%', Buzz.click);
+  }
+
+  /// Your turfs in the order modules do most good: hubs first (their
+  /// modules lift every turf they supply), then by what the turf pays.
+  List<Turf> get _socketOrder {
+    final ix = w.index;
+    double worth(Turf t) {
+      final y = ix.turfHourly[t.id] ?? const Resources();
+      return y.credits + y.materials * goodValue(Good.materials) + y.intel * goodValue(Good.intel);
+    }
+
+    return w.playerTurfs.toList()
+      ..sort((a, b) => a.isHub != b.isHub ? (a.isHub ? -1 : 1) : worth(b).compareTo(worth(a)));
+  }
+
+  /// Empty module sockets across your turfs.
+  int get emptySockets {
+    var n = 0;
+    for (final t in w.playerTurfs) {
+      n += math.max(0, w.socketsOf(t) - w.modulesOn(t.id).length);
+    }
+    return n;
+  }
+
+  /// Puts the best modules in the stash into every empty socket, or only
+  /// into the sockets of turf [only].
+  Outcome fillSockets(int now, {String? only}) {
+    if (w.stash.isEmpty) return const Outcome.fail('The stash is empty');
+    final order = only == null
+        ? _socketOrder
+        : [
+            if (w.turfs[only] case final t? when t.isPlayer) t,
+          ];
+    if (!order.any((t) => freeSocket(t) >= 0)) return const Outcome.fail('Every socket is full: buy more on a turf');
+    final best = List.of(w.stash)..sort((a, b) => b.score.compareTo(a.score));
+    var placed = 0;
+    for (final t in order) {
+      while (best.isNotEmpty) {
+        final socket = freeSocket(t);
+        if (socket < 0) break;
+        final m = best.removeAt(0)
+          ..hexId = t.id
+          ..socket = socket;
+        w.stash.remove(m);
+        (w.installed[t.id] ??= []).add(m);
+        placed++;
+      }
+      if (best.isEmpty) break;
+    }
+    w.modulesDirty = true;
+    w.reindex();
+    w.log(now, 'gain', 'Socketed $placed module${placed == 1 ? '' : 's'} from the stash');
+    return Outcome(true, '$placed module${placed == 1 ? '' : 's'} socketed', Buzz.click);
+  }
+
+  // ------------------------------------------------------------ shop
+
+  Quote shopQuote(ShopItem item, int now) {
+    switch (item) {
+      case ShopItem.repairCrew:
+        var mats = 0.0, n = 0;
+        for (final t in w.playerTurfs) {
+          if (t.integrity >= 99.5) continue;
+          mats += repairCost(t).materials;
+          n++;
+        }
+        if (n == 0) return const Quote.blocked('Every turf is intact');
+        return _q(Cost(materials: mats * kRepairCrewShare), note: '$n turf${n == 1 ? '' : 's'} to fix');
+      case ShopItem.energyDrink:
+        if (p.energy >= w.perks.energyMax - 0.5) return const Quote.blocked('Energy is full');
+      default:
+        break;
+    }
+    final bought = w.shopBought(item.key, now ~/ kDay);
+    final cost = item.basePrice(level: p.level, hourly: hourlyValue) * (item.markup(bought) * _discount);
+    return _q(cost, note: bought == 0 ? null : 'Bought $bought today: price up');
+  }
+
+  Outcome buy(ShopItem item, int now) {
+    final q = shopQuote(item, now);
+    if (!q.allowed) return Outcome.fail(q.blocker ?? 'Not enough funds');
+    _pay(q.cost);
+    w.addShopBought(item.key, now ~/ kDay);
+    if (item.isBoost) {
+      w.addBoost(item.key, now, item.boostMs);
+      w.reindex();
+      final left = Duration(milliseconds: w.boosts[item.key]! - now);
+      w.log(now, 'gain', '${item.title} on for ${fmtDuration(left)}');
+      return Outcome(true, '${item.title} · ${fmtDuration(left)} left', Buzz.surge);
+    }
+    switch (item) {
+      case ShopItem.repairCrew:
+        var n = 0;
+        for (final t in w.playerTurfs) {
+          if (t.integrity >= 99.5) continue;
+          t.integrity = 100;
+          w.liftSiege(t.id);
+          w.markTurf(t);
+          n++;
+        }
+        w.reindex();
+        w.log(now, 'gain', 'Repair Crew fixed $n turf${n == 1 ? '' : 's'}');
+        return Outcome(true, '$n turf${n == 1 ? '' : 's'} back to 100%', Buzz.click);
+      case ShopItem.energyDrink:
+        p.energy = w.perks.energyMax;
+        return Outcome(true, 'Energy full · ${p.energy.round()}', Buzz.click);
+      case ShopItem.supplyCrate:
+        final m = dropModule(w, _rng(now, 'crate${w.stash.length}'), now, minRarity: Rarity.uncommon, levelBonus: 1);
+        w.log(now, 'gain', 'Supply Crate: ${m.name}');
+        return Outcome(true, '${m.rarity.label}: ${m.name}', Buzz.surge);
+      case ShopItem.blueprint:
+        p.blueprints++;
+        return Outcome(true, 'Blueprint bought · ${p.blueprints} in hand', Buzz.click);
+      default:
+        return const Outcome.fail('Not for sale');
+    }
   }
 
   // ------------------------------------------------------------ perks
@@ -825,7 +1090,7 @@ class Commands {
         ..wins = 0
         ..losses = 0
         ..nemesisRank = 0
-        ..aggression = rng.range(0.75, 1.3);
+        ..aggression = factionProfile(f.archetype).rollAggression(rng);
     }
     w.factionsDirty = true;
     w.clearGenomeCache();

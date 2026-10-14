@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:latlong2/latlong.dart' show LatLng;
 
+import '../core/rng.dart';
 import '../geo/hex_grid.dart';
 import 'balance.dart';
 import 'genetics.dart';
@@ -192,11 +193,140 @@ class World {
   void forgetTurf(String turfId) {
     liftSiege(turfId);
     (player.settings[kSocketsKey] as Map?)?.remove(turfId);
+    (player.settings[kLinksKey] as Map?)?.remove(turfId);
   }
 
   void clearTurfExtras() {
     player.settings.remove(kSiegeKey);
     player.settings.remove(kSocketsKey);
+    player.settings.remove(kLinksKey);
+    player.settings.remove(kBoostsKey);
+  }
+
+  // ------------------------------------------------------------- relay links
+
+  /// A hub holds up to [kRelayLinksPerHub] outgoing relays. The first lives
+  /// in the turf row ([Turf.relayTarget]), the others in the settings.
+  List<String> _extraLinks(String hubId) => [
+        for (final e in ((player.settings[kLinksKey] as Map?)?[hubId] as List? ?? const [])) '$e',
+      ];
+
+  void _setExtraLinks(String hubId, List<String> ids) {
+    if (ids.isEmpty) {
+      (player.settings[kLinksKey] as Map?)?.remove(hubId);
+    } else {
+      _bag(kLinksKey)[hubId] = ids;
+    }
+  }
+
+  /// Every hub [hub] relays to, first link first.
+  List<String> relayLinks(Turf hub) => [
+        if (hub.relayTarget != null) hub.relayTarget!,
+        ..._extraLinks(hub.id),
+      ];
+
+  /// A relay runs between [a] and [b], in either direction.
+  bool linked(String a, String b) {
+    final ta = turfs[a], tb = turfs[b];
+    return (ta != null && relayLinks(ta).contains(b)) || (tb != null && relayLinks(tb).contains(a));
+  }
+
+  void addRelayLink(Turf from, String to) {
+    if (relayLinks(from).contains(to)) return;
+    if (from.relayTarget == null) {
+      from.relayTarget = to;
+      markTurf(from);
+    } else {
+      _setExtraLinks(from.id, [..._extraLinks(from.id), to]);
+    }
+  }
+
+  void removeRelayLink(Turf from, String to) {
+    final extra = _extraLinks(from.id)..remove(to);
+    if (from.relayTarget == to) {
+      from.relayTarget = extra.isEmpty ? null : extra.removeAt(0);
+      markTurf(from);
+    }
+    _setExtraLinks(from.id, extra);
+  }
+
+  /// Cuts every relay that points at [turfId].
+  void cutRelaysTo(String turfId) {
+    for (final other in turfs.values) {
+      if (relayLinks(other).contains(turfId)) removeRelayLink(other, turfId);
+    }
+  }
+
+  // ------------------------------------------------------------- boosts
+
+  /// Shop boosts running now, by key (shop.dart), with the time each ends.
+  /// The simulator drops them when they run out, so being listed means on.
+  Map<String, int> get boosts => {
+        for (final e in ((player.settings[kBoostsKey] as Map?) ?? const {}).entries)
+          '${e.key}': (e.value as num).toInt(),
+      };
+
+  bool boosted(String key) => (player.settings[kBoostsKey] as Map?)?.containsKey(key) ?? false;
+
+  /// Starts a boost, or stretches one already running by [ms].
+  void addBoost(String key, int now, int ms) {
+    final until = boosts[key] ?? now;
+    _bag(kBoostsKey)[key] = math.max(until, now) + ms;
+  }
+
+  /// Drops boosts that ended by [now]. True when one did.
+  bool expireBoosts(int now) {
+    final bag = player.settings[kBoostsKey] as Map?;
+    if (bag == null || bag.isEmpty) return false;
+    final before = bag.length;
+    bag.removeWhere((_, v) => (v as num).toInt() <= now);
+    if (bag.isEmpty) player.settings.remove(kBoostsKey);
+    return bag.length != before;
+  }
+
+  // ------------------------------------------------------------- shop
+
+  /// How many of [key] were bought on in-game day [day]: prices climb.
+  int shopBought(String key, int day) {
+    final v = player.settings[kShopKey];
+    if (v is List && v.length >= 2 && (v[0] as num).toInt() == day && v[1] is Map) {
+      return ((v[1] as Map)[key] as num?)?.toInt() ?? 0;
+    }
+    return 0;
+  }
+
+  void addShopBought(String key, int day) {
+    final v = player.settings[kShopKey];
+    final counts = <String, dynamic>{
+      if (v is List && v.length >= 2 && (v[0] as num).toInt() == day && v[1] is Map)
+        ...(v[1] as Map).cast<String, dynamic>(),
+    };
+    counts[key] = shopBought(key, day) + 1;
+    player.settings[kShopKey] = [day, counts];
+  }
+
+  // ------------------------------------------------------------- upkeep
+
+  /// Saves from before 0.6 have three rival factions and week-long lockdowns.
+  /// Brings both up to date; true when something changed.
+  bool upgradeSave() {
+    var changed = false;
+    final have = {for (final f in factions) f.archetype};
+    final rng = Rng(player.worldSeed ^ 0xFAC7 ^ factions.length);
+    for (var i = 0; i < kFactionProfiles.length; i++) {
+      if (have.contains(i)) continue;
+      factions.add(rivalFaction(i, rng));
+      factionsDirty = true;
+      changed = true;
+    }
+    for (final e in events) {
+      if (e.type != EventType.lockdown || e.expiresAt <= e.createdAt + kLockdownMs) continue;
+      e.expiresAt = e.createdAt + kLockdownMs;
+      eventsDirty = true;
+      changed = true;
+    }
+    if (changed) reindex();
+    return changed;
   }
 
   // ------------------------------------------------------------- exchange
@@ -284,9 +414,12 @@ class World {
     final f = spawn == null ? null : factionByArchetype(spawn.faction);
     if (spawn != null && f != null) {
       final p = offsetLatLng(grid.center(block), spawn.bearing, spawn.distanceM);
-      t = makeTurf(lat: p.latitude, lng: p.longitude, name: 'Crew post', owner: factionOwner(f.id), now: 0)
-        ..integrity = 100;
-      _presetById[t.id] = t;
+      // Never inside ground already taken (a crew added after you planted).
+      if (!_persistedNear(block, p.latitude, p.longitude, kTurfSpacingM)) {
+        t = makeTurf(lat: p.latitude, lng: p.longitude, name: 'Crew post', owner: factionOwner(f.id), now: 0)
+          ..integrity = 100;
+        _presetById[t.id] = t;
+      }
     }
     if (_presets.length > 30000) {
       _presets.clear();
@@ -294,6 +427,15 @@ class World {
     }
     _presets[block] = t;
     return (t == null || turfs.containsKey(t.id) || isRazed(t.id)) ? null : t;
+  }
+
+  bool _persistedNear(String block, double lat, double lng, double radiusM) {
+    for (final b in grid.disk(block, 1)) {
+      for (final t in _buckets[b] ?? const <Turf>[]) {
+        if (metersBetween(lat, lng, t.lat, t.lng) < radiusM) return true;
+      }
+    }
+    return false;
   }
 
   Turf? turfById(String id) => turfs[id] ?? (isRazed(id) ? null : _presetById[id]);
@@ -351,21 +493,41 @@ class World {
     return null;
   }
 
-  double threatOf(Faction f) => threatPower(
-        maxHubLevel: index.maxHubLevel,
+  /// A faction's strength when it raids, scaled to your best hub.
+  double threatOf(Faction f) => threatAt(f, index.maxHubLevel);
+
+  /// A faction's strength around a hub of level [hubLevel] (0: no hub).
+  double threatAt(Faction f, int hubLevel) =>
+      threatPower(
+        maxHubLevel: hubLevel,
         playerLevel: player.level,
         liquidations: player.liquidations,
         aggression: f.aggression,
         nemesisRank: f.nemesisRank,
-      );
+      ) *
+      factionProfile(f.archetype).grit;
 
-  /// Defense of a rival turf when the player tries to breach it.
+  /// The strongest of your hubs whose supply sphere covers [t], if any.
+  HubStats? coverHub(Turf t) {
+    HubStats? best;
+    for (final s in index.hubs.values) {
+      if (kmBetween(t, s.hub) <= s.radiusKm && (best == null || s.def > best.def)) best = s;
+    }
+    return best;
+  }
+
+  /// Defense of a rival turf when the player tries to breach it. Scales with
+  /// the hub that covers it, so rivals far from your strongholds stay weak.
   double enemyDefense(Turf t) {
     if (!t.isHostile) return 0;
     final f = factionById(factionIdOf(t.owner));
     if (f == null) return 0;
-    final persisted = turfs.containsKey(t.id);
-    return threatOf(f) * (persisted ? 1.2 : 0.8) * anomalyDefMult(t.anomaly) * (0.5 + t.integrity / 200);
+    return threatAt(f, coverHub(t)?.hub.hubLevel ?? 0) *
+        kRivalDefMult *
+        anomalyDefMult(t.anomaly) *
+        (0.5 + t.integrity.clamp(0, 100) / 200) *
+        perks.rivalDefMult *
+        (boosted(kBoostInsideMan) ? kInsideManDefense : 1);
   }
 
   double kmBetween(Turf a, Turf b) => haversineKm(LatLng(a.lat, a.lng), LatLng(b.lat, b.lng));
@@ -387,6 +549,22 @@ const kSeenKey = 'seen';
 const kSiegeKey = 'siege';
 const kSocketsKey = 'sockets';
 const kTradeKey = 'trade';
+const kLinksKey = 'links';
+const kBoostsKey = 'boosts';
+const kShopKey = 'shop';
+
+/// Boost keys (see shop.dart) the engine reads.
+const kBoostHiredGuns = 'hired_guns';
+const kBoostInsideMan = 'inside_man';
+const kBoostBarricades = 'barricades';
+const kBoostCeasefire = 'ceasefire';
+
+/// A rival faction as first created, with an aggression from its profile.
+Faction rivalFaction(int archetype, Rng rng) => Faction(
+      id: 'rival$archetype',
+      archetype: archetype,
+      aggression: factionProfile(archetype).rollAggression(rng),
+    );
 
 /// Why a turf pays what it pays: its base output and every multiplier on it.
 class TurfYield {
@@ -438,6 +616,25 @@ class TurfYield {
   final Resources flat;
 
   double get _k => garrison * modules * level * hub * trade * aura * supply * lockdown;
+
+  /// The same turf with another garrison or hub multiplier (upgrade previews).
+  TurfYield copyWith({double? garrison, double? hub}) => TurfYield(
+        base: base,
+        garrison: garrison ?? this.garrison,
+        modules: modules,
+        level: level,
+        hub: hub ?? this.hub,
+        trade: trade,
+        aura: aura,
+        supply: supply,
+        lockdown: lockdown,
+        surge: surge,
+        station: station,
+        market: market,
+        vaultCredits: vaultCredits,
+        vaultLogistics: vaultLogistics,
+        flat: flat,
+      );
 
   Resources get total => Resources(
         credits: base.credits * _k * surge * station * vaultCredits * market,
@@ -591,13 +788,13 @@ class WorldIndex {
 
     final edges = <(String, String)>[];
     for (final s in ix.hubs.values) {
-      final target = s.hub.relayTarget;
-      if (target == null) continue;
-      final ts = ix.hubs[target];
-      if (ts == null || !s.canRelay || !ts.canRelay) continue;
-      edges.add((s.hub.id, target));
-      final a = find(s.hub.id), b = find(target);
-      if (a != b) parent[a] = b;
+      for (final target in w.relayLinks(s.hub)) {
+        final ts = ix.hubs[target];
+        if (ts == null || !s.canRelay || !ts.canRelay) continue;
+        edges.add((s.hub.id, target));
+        final a = find(s.hub.id), b = find(target);
+        if (a != b) parent[a] = b;
+      }
     }
     final rootToNet = <String, int>{};
     for (final s in ix.hubs.values) {
@@ -640,6 +837,7 @@ class WorldIndex {
 
     // Per-turf yield + defense ---------------------------------------------
     final lvlMult = levelYieldMult(w.player.level);
+    final barricades = w.boosted(kBoostBarricades) ? kBarricadeDefense : 1.0;
     var total = const Resources();
     for (final t in players) {
       final hubId = ix.supplier[t.id];
@@ -692,7 +890,7 @@ class WorldIndex {
         def += hubS.def * kHubDefShare * (1 + hubS.bulwark);
       }
       if (net != null) def += net.defPool;
-      def *= math.max(0.25, t.integrity / 100) * vault.defenseMult * perkFx.defenseMult;
+      def *= math.max(0.25, t.integrity / 100) * vault.defenseMult * perkFx.defenseMult * barricades;
       ix.turfDefense[t.id] = def;
 
       if (t.anomaly != Anomaly.deadZone) {

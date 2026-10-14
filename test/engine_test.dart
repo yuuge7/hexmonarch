@@ -6,18 +6,21 @@ import 'package:hexmonarch/core/format.dart';
 import 'package:hexmonarch/core/rng.dart';
 import 'package:hexmonarch/domain/actions.dart';
 import 'package:hexmonarch/domain/balance.dart';
+import 'package:hexmonarch/domain/empire.dart';
 import 'package:hexmonarch/domain/forecast.dart';
 import 'package:hexmonarch/domain/genetics.dart';
 import 'package:hexmonarch/domain/jobs.dart';
 import 'package:hexmonarch/domain/loot.dart';
 import 'package:hexmonarch/domain/models.dart';
 import 'package:hexmonarch/domain/perks.dart';
+import 'package:hexmonarch/domain/shop.dart';
 import 'package:hexmonarch/domain/simulation.dart';
 import 'package:hexmonarch/domain/time_guard.dart';
 import 'package:hexmonarch/domain/tiers.dart';
 import 'package:hexmonarch/domain/vault.dart';
 import 'package:hexmonarch/domain/world.dart';
 import 'package:hexmonarch/game/save_file.dart';
+import 'package:hexmonarch/ui/map/map_layers.dart';
 import 'package:hexmonarch/geo/hex_grid.dart';
 
 import 'support.dart';
@@ -446,9 +449,9 @@ void main() {
       expect(w.player.energy, kBaseEnergyMax);
     });
 
-    test('event deck deals 2-4 cards per day once territory exists', () {
-      final r = Simulator(seeded(21)).run(0, kDay + kHour, offline: false);
-      expect(r.eventsRolled, inInclusiveRange(2, 4));
+    test('event deck deals 5-9 cards per day once territory exists', () {
+      final r = Simulator(seeded(21)).run(0, kDay, offline: false);
+      expect(r.eventsRolled, inInclusiveRange(5, 9));
     });
 
     test('newcomers are never dealt a lockdown or an offensive', () {
@@ -816,6 +819,19 @@ void main() {
       expect(t.isPlayer, isTrue);
     });
 
+    test('a siege left on a turf that is already whole is lifted on the next tick', () {
+      final w = freshWorld(seed: 6);
+      final (lat, lng) = openSpot(w);
+      final cmd = Commands(w);
+      cmd.claim(lat, lng, 0, name: 'Whole');
+      cmd.establishHub(w.playerTurfs.single.id, 0); // supplied: it stays at 100
+      w.factions.clear();
+      final t = w.playerTurfs.single..integrity = 100;
+      w.besiege(t, 0);
+      Simulator(w).run(0, 60 * 1000, offline: false);
+      expect(w.siegeSince(t.id), isNull);
+    });
+
     test('an offensive nobody saw announced wrecks the hub but cannot take it', () {
       Turf land({required int announced}) {
         final w = corner(7);
@@ -1062,6 +1078,414 @@ void main() {
       expect(w.vault.rank(VaultUpgrade.offlineIncome), 12);
       expect(w.vault.offlineMult, closeTo(1.24, 1e-9));
       expect(w.player.keys, 100 - (5 * 1 + 5 * 2 + 2 * 3));
+    });
+  });
+
+  group('0.6: event waves, relays, rivals, shop', () {
+    void rich(World w) => w.player
+      ..credits = 1e9
+      ..materials = 1e9
+      ..intel = 1e9;
+
+    test('a hub relays to up to three hubs', () {
+      final w = freshWorld(seed: 8);
+      final cmd = Commands(w);
+      rich(w);
+      final ids = <String>[];
+      for (var i = 0; i < 5; i++) {
+        final (lat, lng) = openSpot(w, 0, i * 0.05); // ~5.6 km apart
+        cmd.claim(lat, lng, 0, name: 'H$i');
+        final t = w.playerTurfs.firstWhere((t) => t.name == 'H$i');
+        cmd.establishHub(t.id, 0);
+        ids.add(t.id);
+      }
+      for (var i = 0; i < 4; i++) {
+        cmd.upgradeHub(ids[0], 0); // level 5 reaches 22.5 km
+      }
+      final h0 = w.turfs[ids[0]]!;
+      for (final to in ids.sublist(1, 4)) {
+        final out = cmd.buildRelay(ids[0], to, 0);
+        expect(out.ok, isTrue, reason: out.message);
+      }
+      expect(w.relayLinks(h0), ids.sublist(1, 4));
+      expect(h0.relayTarget, ids[1], reason: 'the first link still lives in the turf row');
+      expect(cmd.relayQuote(ids[0], ids[4]).blocker, 'All $kRelayLinksPerHub relays in use');
+      expect(cmd.relayQuote(ids[0], ids[4]).note, contains('Sever'));
+      expect(cmd.relayQuote(ids[1], ids[0]).blocker, 'Already linked');
+      final net = w.index.networkOfHub(ids[0])!;
+      expect(net.relays, 3);
+      expect(net.hubs, hasLength(4));
+
+      // Severing the first link moves the next one into the turf row.
+      expect(cmd.severRelay(ids[0], ids[1], 0).ok, isTrue);
+      expect(h0.relayTarget, ids[2]);
+      expect(cmd.buildRelay(ids[0], ids[4], 0).ok, isTrue);
+      expect(w.relayLinks(h0), [ids[2], ids[3], ids[4]]);
+
+      // Deleting a linked hub cuts the link wherever it is kept.
+      expect(cmd.delete(ids[3], 1).ok, isTrue);
+      expect(w.relayLinks(h0), [ids[2], ids[4]]);
+      final copy = w.clone();
+      expect(copy.relayLinks(copy.turfs[ids[0]]!), [ids[2], ids[4]], reason: 'links travel with the save');
+    });
+
+    test('the event deck deals in daytime waves, more cards, never at night', () {
+      final w = freshWorld(seed: 21);
+      final cmd = Commands(w);
+      final (lat, lng) = openSpot(w);
+      cmd.claim(lat, lng, 0);
+      cmd.establishHub(w.playerTurfs.single.id, 0);
+      final sim = Simulator(w);
+      final seen = <String, WorldEvent>{};
+      for (var h = 0; h < 72; h++) {
+        sim.run(h * kHour, (h + 1) * kHour, offline: false);
+        for (final e in w.events) {
+          seen[e.id] = e;
+        }
+      }
+      expect(seen.length, inInclusiveRange(12, 27), reason: '5-9 a day over three days, minus caps');
+      for (final e in seen.values) {
+        expect(kEventWaveHours, contains(DateTime.fromMillisecondsSinceEpoch(e.createdAt).hour));
+        if (e.type == EventType.convoy) expect(e.expiresAt - e.createdAt, kConvoyWindowMs);
+        if (e.type == EventType.lockdown) expect(e.expiresAt - e.createdAt, kLockdownMs);
+      }
+      final hours = {for (final e in seen.values) DateTime.fromMillisecondsSinceEpoch(e.createdAt).hour};
+      expect(hours.length, greaterThan(1), reason: 'more than one wave a day');
+
+      // The countdown in Ops points at the next wave, at most a night away.
+      for (var t = 0; t < kDay; t += 17 * 60 * 1000) {
+        final next = nextEventWave(t);
+        expect(eventWave(next), greaterThanOrEqualTo(0));
+        expect(next, greaterThan(t));
+        expect(next - t, lessThanOrEqualTo(12 * kHour));
+      }
+    });
+
+    test('a lockdown lasts a day and can be paid off from anywhere, for more', () {
+      final w = freshWorld(seed: 3);
+      final cmd = Commands(w);
+      rich(w);
+      final (lat, lng) = openSpot(w);
+      cmd.claim(lat, lng, 0);
+      final t = w.playerTurfs.single;
+      w.events.add(WorldEvent(
+        id: 'lock',
+        type: EventType.lockdown,
+        target: t.id,
+        expiresAt: 7 * kDay, // as old saves dealt them
+        payload: {'created': 0, 'district': t.district, 'near': t.name},
+      ));
+      expect(w.upgradeSave(), isTrue);
+      expect(w.events.single.expiresAt, kLockdownMs);
+
+      final here = cmd.eventQuote('lock', t.lat, t.lng);
+      final far = cmd.eventQuote('lock', t.lat + 1, t.lng);
+      expect(here.blocker, isNull);
+      expect(far.blocker, isNull);
+      expect(cmd.eventQuote('lock', null, null).blocker, isNull, reason: 'no GPS fix needed');
+      expect(far.cost.credits, closeTo(here.cost.credits * kLockdownRemoteMult, 1e-6));
+      expect(cmd.resolveEvent('lock', null, null, 1).ok, isTrue);
+      expect(w.events, isEmpty);
+    });
+
+    test('six factions: old saves get the new three, each with its own grit', () {
+      final w = freshWorld();
+      w.factions.removeWhere((f) => f.archetype >= 3);
+      expect(w.upgradeSave(), isTrue);
+      expect({for (final f in w.factions) f.archetype}, {0, 1, 2, 3, 4, 5});
+      expect(w.factionsDirty, isTrue);
+      expect(w.upgradeSave(), isFalse);
+      expect({for (final f in w.factions) factionName(f, 1)}, hasLength(6));
+      expect({for (final f in w.factions) factionName(f, kTier2Level)}, hasLength(6));
+      final weak = w.factions.firstWhere((f) => f.archetype == 3)..aggression = 1;
+      final tough = w.factions.firstWhere((f) => f.archetype == 5)..aggression = 1;
+      expect(w.threatOf(weak), lessThan(w.threatOf(tough)));
+      expect(factionProfile(3).raids, lessThan(factionProfile(0).raids), reason: 'more rivals, not twice the raids');
+
+      // Day-one rival turfs come from every faction.
+      final owners = <int>{};
+      for (var i = 0; i < 400; i++) {
+        final spawn = rivalSpawnFor('r9/$i:${i * 7}', 42);
+        if (spawn != null) owners.add(spawn.faction);
+      }
+      expect(owners, {0, 1, 2, 3, 4, 5});
+    });
+
+    test('rivals scale with the hub that covers them, not your best hub anywhere', () {
+      final w = freshWorld(seed: 4);
+      final cmd = Commands(w);
+      rich(w);
+      w.player.level = 20;
+      final rival = firstRival(w);
+      final before = w.enemyDefense(rival);
+
+      // A big hub 50 km away changes nothing here.
+      final (fLat, fLng) = openSpot(w, rival.lat, rival.lng + 0.45);
+      cmd.claim(fLat, fLng, 0, name: 'Far');
+      final far = w.playerTurfs.single;
+      cmd.establishHub(far.id, 0);
+      for (var i = 0; i < 15; i++) {
+        cmd.upgradeHub(far.id, 0);
+      }
+      expect(w.index.maxHubLevel, 16);
+      expect(w.enemyDefense(rival), closeTo(before, 1e-9));
+      expect(cmd.breachOdds(rival), greaterThan(0.6), reason: 'far from your strongholds rivals stay weak');
+
+      // One right next to it arms them up, and backs your strike as much.
+      final (nLat, nLng) = openSpot(w, rival.lat, rival.lng + 0.003);
+      cmd.claim(nLat, nLng, 0, name: 'Near');
+      final near = w.playerTurfs.firstWhere((t) => t.name == 'Near');
+      cmd.establishHub(near.id, 0);
+      for (var i = 0; i < 15; i++) {
+        cmd.upgradeHub(near.id, 0);
+      }
+      expect(w.coverHub(rival)?.hub.id, near.id);
+      expect(w.enemyDefense(rival), greaterThan(before * 5));
+      expect(cmd.breachOdds(rival), greaterThan(0.4));
+    });
+
+    test('more ways to hit: backup, Recon, Hired Guns, Inside Man, and wear', () {
+      final w = freshWorld(seed: 4);
+      final cmd = Commands(w);
+      rich(w);
+      final rival = firstRival(w);
+      final (sLat, sLng) = openSpot(w, rival.lat, rival.lng + 0.0018);
+      cmd.claim(sLat, sLng, 0, name: 'Post');
+      final post = w.playerTurfs.single;
+      final s0 = cmd.strikeParts(rival);
+      expect(s0.backupFrom?.id, post.id);
+      for (var i = 0; i < 9; i++) {
+        cmd.upgradeGarrison(post.id, 0);
+      }
+      final s1 = cmd.strikeParts(rival);
+      expect(s1.backup, closeTo(kBackupShare * garrisonDef(10), 1e-9));
+      expect(s1.total, greaterThan(s0.total));
+
+      final def0 = w.enemyDefense(rival);
+      expect(cmd.buyPerk(StreetPerk.recon, 0).ok, isTrue);
+      expect(w.enemyDefense(rival), closeTo(def0 * 0.95, 1e-6));
+      expect(cmd.buy(ShopItem.hiredGuns, 0).ok, isTrue);
+      expect(cmd.localStrike(rival), closeTo(s1.total * kHiredGunsStrike, 1e-6));
+      expect(cmd.buy(ShopItem.insideMan, 0).ok, isTrue);
+      expect(w.enemyDefense(rival), closeTo(def0 * 0.95 * kInsideManDefense, 1e-6));
+      Simulator(w).run(0, 3 * kHour, offline: false);
+      expect(w.boosts, isEmpty, reason: 'boosts run out on their own');
+      expect(cmd.strikeParts(rival).boost, 1);
+
+      // A failed breach scars the turf and does not feed their nemesis rank.
+      final f = w.factionById(factionIdOf(rival.owner))!..aggression = 1e6;
+      final wins = f.wins;
+      expect(cmd.breachOdds(rival), closeTo(0.05, 1e-9));
+      var fails = 0;
+      for (var now = 10; fails < 2 && now < 100; now++) {
+        final out = cmd.breach(rival.id, null, null, now);
+        if (out.ok) fail('a 5% breach landed in the test seed: pick another');
+        fails++;
+      }
+      final scarred = w.turfs[rival.id]!;
+      expect(scarred.isHostile, isTrue);
+      expect(scarred.integrity, 100 - 2 * kBreachWear);
+      expect(w.presetRival(rival.block), isNull, reason: 'the stored copy replaces the day-one turf');
+      expect(f.wins, wins);
+      f.aggression = 1;
+      expect(w.enemyDefense(scarred), lessThan(w.enemyDefense(rival)));
+    });
+
+    test('the shop: prices follow output and climb, items do what they say', () {
+      final w = freshWorld(seed: 3);
+      final cmd = Commands(w);
+      rich(w);
+      final (lat, lng) = openSpot(w);
+      cmd.claim(lat, lng, 0);
+      final hub = w.playerTurfs.single;
+      cmd.establishHub(hub.id, 0);
+
+      final first = cmd.shopQuote(ShopItem.supplyCrate, 0).cost.credits;
+      expect(cmd.buy(ShopItem.supplyCrate, 0).ok, isTrue);
+      expect(w.stash.single.rarity.index, greaterThanOrEqualTo(Rarity.uncommon.index));
+      expect(cmd.shopQuote(ShopItem.supplyCrate, 0).cost.credits, closeTo(first * 1.5, 1e-6));
+      expect(cmd.shopQuote(ShopItem.supplyCrate, kDay).cost.credits, closeTo(first, 1e-6), reason: 'a new day');
+
+      expect(cmd.shopQuote(ShopItem.energyDrink, 0).blocker, 'Energy is full');
+      w.player.energy = 0;
+      final drink = cmd.shopQuote(ShopItem.energyDrink, 0).cost.credits;
+      expect(cmd.buy(ShopItem.energyDrink, 0).ok, isTrue);
+      expect(w.player.energy, w.perks.energyMax);
+      w.player.energy = 0;
+      expect(cmd.shopQuote(ShopItem.energyDrink, 0).cost.credits, closeTo(drink * 2, 1e-6));
+
+      expect(cmd.shopQuote(ShopItem.repairCrew, 0).blocker, 'Every turf is intact');
+      hub.integrity = 40;
+      w.besiege(hub, 0);
+      final mats = repairCost(hub).materials * kRepairCrewShare;
+      expect(cmd.shopQuote(ShopItem.repairCrew, 0).cost.materials, closeTo(mats, 1e-6));
+      expect(cmd.buy(ShopItem.repairCrew, 0).ok, isTrue);
+      expect(hub.integrity, 100);
+      expect(w.siegeSince(hub.id), isNull);
+
+      final def = w.index.turfDefense[hub.id]!;
+      expect(cmd.buy(ShopItem.barricades, 0).ok, isTrue);
+      expect(w.index.turfDefense[hub.id], closeTo(def * kBarricadeDefense, 1e-6));
+      expect(cmd.buy(ShopItem.barricades, kHour).ok, isTrue);
+      expect(w.boosts[kBoostBarricades], 24 * kHour, reason: 'buying again stretches it');
+      Simulator(w).run(0, 24 * kHour, offline: false);
+      expect(w.boosted(kBoostBarricades), isFalse);
+
+      final bp = w.player.blueprints;
+      expect(cmd.buy(ShopItem.blueprint, 0).ok, isTrue);
+      expect(w.player.blueprints, bp + 1);
+    });
+
+    test('a Ceasefire keeps every crew home while it runs, forecast included', () {
+      World corner() {
+        final w = freshWorld(seed: 5);
+        rich(w);
+        final (lat, lng) = openSpot(w);
+        Commands(w).claim(lat, lng, 0, name: 'Corner');
+        for (final f in w.factions) {
+          f.aggression = 40; // raids nearly every hour
+        }
+        return w;
+      }
+
+      final open = corner();
+      expect(Simulator(open).run(0, 6 * kHour, offline: true).raidsLost, greaterThan(0));
+
+      final quiet = corner();
+      expect(Commands(quiet).buy(ShopItem.ceasefire, 0).ok, isTrue);
+      const span = 6 * kHour - 1; // raids resume on the hour it ends
+      expect(forecastAlerts(quiet, 0, horizonMs: span).where((a) => a.urgent), isEmpty);
+      final r = Simulator(quiet).run(0, span, offline: true);
+      expect(r.raidsLost + r.raidsRepelled, 0);
+      Simulator(quiet).run(span, 6 * kHour, offline: true);
+      expect(quiet.boosted(kBoostCeasefire), isFalse, reason: 'over after 6 hours');
+      expect(Simulator(quiet).run(6 * kHour, 12 * kHour, offline: true).raidsLost, greaterThan(0));
+    });
+  });
+
+  group('empire: bulk commands', () {
+    /// [n] turfs in a row, one hub among them, everything else at garrison 1.
+    (World, Commands) empire(int n) {
+      final w = freshWorld(seed: 13);
+      final cmd = Commands(w);
+      w.player
+        ..credits = 1e12
+        ..materials = 1e12
+        ..intel = 1e12;
+      var lng = 0.0;
+      for (var i = 0; i < n; i++) {
+        final (la, ln) = openSpot(w, 0, lng);
+        expect(cmd.claim(la, ln, 0, name: 'T$i').ok, isTrue);
+        lng = ln + 0.0012;
+      }
+      cmd.establishHub(w.playerTurfs.first.id, 0);
+      return (w, cmd);
+    }
+
+    test('+N levels on every turf costs exactly what N single upgrades would', () {
+      final (w, cmd) = empire(12);
+      final ids = [for (final t in w.playerTurfs) t.id];
+      final plan = cmd.upgradePlan(w.playerTurfs, UpgradeKind.garrison, add: 10);
+      expect(plan.wanted, 120);
+      expect(plan.complete, isTrue);
+      var credits = 0.0;
+      for (var g = 1; g <= 10; g++) {
+        credits += garrisonCost(g, discount: 1).credits;
+      }
+      expect(plan.cost.credits, closeTo(12 * credits, 1e-6));
+      expect(plan.gain.credits, greaterThan(0));
+
+      // The preview is exact: the same garrisons on a copy pay that much more.
+      final ghost = w.clone();
+      final before = ghost.index.hourly.credits;
+      for (final t in ghost.playerTurfs) {
+        t.garrison += 10;
+      }
+      ghost.reindex();
+      expect(ghost.index.hourly.credits - before, closeTo(plan.gain.credits, 1e-6));
+
+      final level = w.player.level;
+      final out = cmd.bulkUpgrade(ids, UpgradeKind.garrison, 1, add: 10);
+      expect(out.ok, isTrue, reason: out.message);
+      expect(w.playerTurfs.every((t) => t.garrison == 11), isTrue);
+      expect(w.player.level, greaterThan(level), reason: 'the XP of 120 upgrades');
+    });
+
+    test('up to a level only raises the ones below it', () {
+      final (w, cmd) = empire(4);
+      final ts = w.playerTurfs.toList();
+      ts[0].garrison = 8;
+      ts[1].garrison = 3;
+      expect(cmd.bulkUpgrade([for (final t in ts) t.id], UpgradeKind.garrison, 1, upTo: 5).ok, isTrue);
+      expect([for (final t in ts) t.garrison], [8, 5, 5, 5]);
+      expect(cmd.upgradePlan(ts, UpgradeKind.garrison, upTo: 5).wanted, 0);
+      expect(cmd.bulkUpgrade([for (final t in ts) t.id], UpgradeKind.garrison, 2, upTo: 5).ok, isFalse);
+    });
+
+    test('as far as funds go: the money spreads over the lowest levels first', () {
+      final (w, cmd) = empire(5);
+      final ts = w.playerTurfs.toList();
+      ts[0].garrison = 6;
+      // Exactly enough for the four level-1 turfs to reach level 3.
+      final c = garrisonCost(1, discount: 1) * 4 + garrisonCost(2, discount: 1) * 4;
+      w.player
+        ..credits = c.credits + 1
+        ..materials = c.materials + 1;
+      final ids = [for (final t in ts) t.id];
+      expect(cmd.upgradePlan(ts, UpgradeKind.garrison, add: 10).cost.affordable(w.player), isFalse);
+      final out = cmd.bulkUpgrade(ids, UpgradeKind.garrison, 1, add: 10, withinFunds: true);
+      expect(out.ok, isTrue, reason: out.message);
+      expect([for (final t in ts) t.garrison], [6, 3, 3, 3, 3]);
+      expect(w.player.materials, closeTo(1, 1e-6), reason: 'level-ups pay credits, never materials');
+      expect(cmd.bulkUpgrade(ids, UpgradeKind.garrison, 2, add: 10, withinFunds: true).ok, isFalse,
+          reason: 'not even one more level');
+    });
+
+    test('hub levels in bulk, scopes, repair all and filling sockets', () {
+      final (w, cmd) = empire(6);
+      final hub = w.playerTurfs.firstWhere((t) => t.isHub);
+      expect(cmd.scoped(TurfScope.hubs), [hub]);
+      expect(cmd.scoped(TurfScope.plain), hasLength(5));
+      final out = cmd.bulkUpgrade([for (final t in w.playerTurfs) t.id], UpgradeKind.hub, 1, add: 9);
+      expect(out.ok, isTrue, reason: out.message);
+      expect(hub.hubLevel, 10, reason: 'plain turfs are skipped');
+      expect(w.pendingLog.any((l) => l.message.contains('Station class')), isTrue);
+
+      final hurt = w.playerTurfs.where((t) => !t.isHub).take(2).toList();
+      for (final t in hurt) {
+        t.integrity = 40;
+        w.besiege(t, 0);
+      }
+      expect(cmd.scoped(TurfScope.damaged), hurt);
+      final q = cmd.repairAllQuote(w.playerTurfs);
+      expect(q.cost.materials, closeTo(repairCost(hurt[0]).materials * 2, 1e-6));
+      expect(cmd.repairAll([for (final t in w.playerTurfs) t.id], 2).ok, isTrue);
+      expect(hurt.every((t) => t.integrity == 100 && w.siegeSince(t.id) == null), isTrue);
+
+      for (var i = 0; i < 3; i++) {
+        dropModule(w, Rng(i), 0);
+      }
+      final best = (List.of(w.stash)..sort((a, b) => b.score.compareTo(a.score))).first;
+      final empty = cmd.emptySockets;
+      expect(cmd.fillSockets(3).ok, isTrue);
+      expect(w.stash, isEmpty);
+      expect(cmd.emptySockets, empty - 3);
+      expect(w.modulesOn(hub.id).map((m) => m.id), contains(best.id), reason: 'the hub gets the best one');
+    });
+  });
+
+  group('map layers', () {
+    test('modes, single switches and the saved setting', () {
+      expect(MapLayers.fromSetting(null).mode, MapMode.tactical, reason: 'old saves keep the map they had');
+      final intel = MapLayers(layersOf(MapMode.intel));
+      expect(intel.on, hasLength(MapLayer.values.length));
+      final custom = intel.toggle(MapLayer.odds);
+      expect(custom.mode, MapMode.custom);
+      expect(custom.toggle(MapLayer.odds).mode, MapMode.intel);
+      final back = MapLayers.fromSetting(jsonDecode(jsonEncode(custom.toSetting())));
+      expect(back.on, custom.on);
+      expect(MapLayers.fromSetting(['labels', 'gone_in_a_later_version']).on, {MapLayer.labels});
+      expect(MapLayers.fromSetting(const <String>[]).mode, MapMode.custom, reason: 'everything off is allowed');
     });
   });
 

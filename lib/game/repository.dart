@@ -27,18 +27,15 @@ class Repository {
             worldSeed: seed,
             createdAt: now,
             wallAtSync: Value(now),
-            lastEventDay: Value(now ~/ kDay - 1),
+            lastEventDay: Value(now ~/ kHour - 1), // holds the hour of the last Event Deck wave
           ));
       final rng = Rng(seed ^ 0xFAC7);
       await db.batch((b) {
-        for (var i = 0; i < 3; i++) {
+        for (var i = 0; i < kFactionProfiles.length; i++) {
+          final f = rivalFaction(i, rng);
           b.insert(
             db.factions,
-            FactionsCompanion.insert(
-              factionId: 'rival$i',
-              archetype: i,
-              aggression: rng.range(0.75, 1.3),
-            ),
+            FactionsCompanion.insert(factionId: f.id, archetype: f.archetype, aggression: f.aggression),
           );
         }
       });
@@ -134,6 +131,8 @@ class Repository {
       world.eventsDirty = true;
       world.reindex();
     }
+    // Older saves: three more rival factions, day-long lockdowns.
+    world.upgradeSave();
     return world;
   }
 
@@ -175,7 +174,7 @@ class Repository {
         blueprints: r.blueprints,
         liquidations: r.liquidations,
         lifetimeCredits: r.lifetimeCredits,
-        lastEventDay: r.lastEventDay,
+        lastEventHour: r.lastEventDay,
         heat: r.threatHeat,
         createdAt: r.createdAt,
         settings: (jsonDecode(r.settingsJson) as Map).cast<String, dynamic>(),
@@ -255,7 +254,7 @@ class Repository {
             blueprints: Value(p.blueprints),
             liquidations: Value(p.liquidations),
             lifetimeCredits: Value(p.lifetimeCredits),
-            lastEventDay: Value(p.lastEventDay),
+            lastEventDay: Value(p.lastEventHour),
             threatHeat: Value(p.heat),
             createdAt: p.createdAt,
             settingsJson: Value(jsonEncode(p.settings)),

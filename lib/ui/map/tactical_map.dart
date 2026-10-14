@@ -10,9 +10,12 @@ import '../../core/format.dart';
 import '../../core/theme.dart';
 import '../../domain/balance.dart';
 import '../../domain/models.dart';
+import '../../domain/world.dart' show HubStats;
 import '../../game/game_controller.dart';
 import '../../geo/hex_grid.dart';
 import '../../platform/tile_cache.dart';
+import 'layers_sheet.dart';
+import 'map_layers.dart';
 
 /// Lets the console recenter / frame the map without owning it.
 class TacticalMapController extends ChangeNotifier {
@@ -250,6 +253,22 @@ class _VisibleTurfs {
   int _seed = 0;
   List<String> _blocks = const [];
 
+  // Breach odds per rival turf, recomputed when the world or your position
+  // changes rather than every frame.
+  String _oddsKey = '';
+  final _odds = <String, (double, bool)>{};
+
+  /// Your odds on [t], and whether you or a turf of yours can reach it now.
+  (double, bool) odds(GameController g, Turf t) {
+    final key = '${g.world.revision}:${g.lat?.toStringAsFixed(4)}:${g.lng?.toStringAsFixed(4)}';
+    if (key != _oddsKey) {
+      _oddsKey = key;
+      _odds.clear();
+    }
+    return _odds.putIfAbsent(
+        t.id, () => (g.actions.breachOdds(t), g.actions.breachQuote(t, g.lat, g.lng).blocker == null));
+  }
+
   List<Turf> collect(GameController g, MapCamera cam, Size size) {
     final w = g.world;
     final out = <Turf>[];
@@ -314,9 +333,10 @@ class _TurfPainter extends CustomPainter {
     double fa(double a) => math.min(1.0, a * k.fill);
     double la(double a) => k.light ? math.min(1.0, a + 0.3) : a;
     final shown = visible.collect(g, cam, size);
+    final layers = g.layers;
 
     // Hub supply spheres ---------------------------------------------------
-    for (final s in ix.hubs.values) {
+    for (final s in layers.has(MapLayer.spheres) ? ix.hubs.values : const <HubStats>[]) {
       final c = cam.latLngToScreenOffset(LatLng(s.hub.lat, s.hub.lng));
       final r = s.radiusKm * 1000 / mpp;
       if (r < 6) continue;
@@ -336,7 +356,7 @@ class _TurfPainter extends CustomPainter {
     // there. One outline around all of them: strokes are drawn per turf, then
     // everything that falls inside another turf's reach is knocked out.
     final reachPx = w.perks.plantRangeM / mpp;
-    if (reachPx >= 14) {
+    if (reachPx >= 14 && layers.has(MapLayer.reach)) {
       final centers = [
         for (final t in shown)
           if (t.isPlayer) cam.latLngToScreenOffset(LatLng(t.lat, t.lng)),
@@ -359,7 +379,7 @@ class _TurfPainter extends CustomPainter {
     }
 
     // Locked-down districts ---------------------------------------------------
-    for (final e in w.events) {
+    for (final e in layers.has(MapLayer.events) ? w.events : const <WorldEvent>[]) {
       if (e.type != EventType.lockdown || e.district == null) continue;
       final dp = _ring(cam, g.grid.boundary(e.district!));
       // No wash on the sunlight map: it would turn a whole white district pink.
@@ -378,16 +398,64 @@ class _TurfPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.4 + k.stroke
       ..color = k.hub.withValues(alpha: la(0.6));
-    for (final s in ix.hubs.values) {
-      final target = s.hub.relayTarget == null ? null : ix.hubs[s.hub.relayTarget];
-      if (target == null) continue;
-      final a = cam.latLngToScreenOffset(LatLng(s.hub.lat, s.hub.lng));
-      final b = cam.latLngToScreenOffset(LatLng(target.hub.lat, target.hub.lng));
+    for (final s in layers.has(MapLayer.relays) ? ix.hubs.values : const <HubStats>[]) {
+      for (final id in w.relayLinks(s.hub)) {
+        final target = ix.hubs[id];
+        if (target == null) continue;
+        final a = cam.latLngToScreenOffset(LatLng(s.hub.lat, s.hub.lng));
+        final b = cam.latLngToScreenOffset(LatLng(target.hub.lat, target.hub.lng));
+        canvas.drawPath(
+          _dashed(Path()
+            ..moveTo(a.dx, a.dy)
+            ..lineTo(b.dx, b.dy), 8, 5),
+          relayPaint,
+        );
+      }
+    }
+
+    final mine = [
+      for (final t in shown)
+        if (t.isPlayer) t,
+    ];
+
+    // Supply lines: every turf to the hub that feeds it ---------------------
+    if (layers.has(MapLayer.supplyLines)) {
+      final spoke = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1 + k.stroke / 2
+        ..color = k.mine.withValues(alpha: la(0.34));
+      for (final t in mine) {
+        final hubId = ix.supplier[t.id];
+        final hub = hubId == null || hubId == t.id ? null : w.turfs[hubId];
+        if (hub == null) continue;
+        canvas.drawLine(cam.latLngToScreenOffset(LatLng(t.lat, t.lng)),
+            cam.latLngToScreenOffset(LatLng(hub.lat, hub.lng)), spoke);
+      }
+    }
+
+    // Reach web: turfs close enough to plant from one another ---------------
+    if (layers.has(MapLayer.reachWeb) && mine.length <= 400) {
+      final range = w.perks.plantRangeM;
+      final dLat = range / 111320;
+      final web = Path();
+      for (var i = 0; i < mine.length; i++) {
+        final a = mine[i];
+        for (var j = i + 1; j < mine.length; j++) {
+          final b = mine[j];
+          if ((a.lat - b.lat).abs() > dLat || metersBetween(a.lat, a.lng, b.lat, b.lng) > range) continue;
+          final pa = cam.latLngToScreenOffset(LatLng(a.lat, a.lng));
+          final pb = cam.latLngToScreenOffset(LatLng(b.lat, b.lng));
+          web
+            ..moveTo(pa.dx, pa.dy)
+            ..lineTo(pb.dx, pb.dy);
+        }
+      }
       canvas.drawPath(
-        _dashed(Path()
-          ..moveTo(a.dx, a.dy)
-          ..lineTo(b.dx, b.dy), 8, 5),
-        relayPaint,
+        _dashed(web, 3, 4),
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1 + k.stroke / 2
+          ..color = k.mine.withValues(alpha: la(0.5)),
       );
     }
 
@@ -484,15 +552,51 @@ class _TurfPainter extends CustomPainter {
         ..color = k.ink.withValues(alpha: la(0.55)),
     );
 
+    // Integrity rings: an arc around each turf, full at 100% ---------------
+    if (layers.has(MapLayer.integrity)) {
+      for (final (c, t) in glyphs) {
+        // Rival turfs only show one once a breach has worn them down.
+        if (!t.isPlayer && !(t.isHostile && t.integrity < 99.5)) continue;
+        final r = math.max(3.0, turfRadiusM(t) / mpp) + 3.5;
+        if (r < 10) continue;
+        final rect = Rect.fromCircle(center: c, radius: r);
+        final v = (t.integrity / 100).clamp(0.0, 1.0);
+        final besieged = t.isPlayer && w.siegeSince(t.id) != null;
+        final color = t.isHostile ? k.hostile : (v >= 0.6 ? k.mine : (v >= 0.3 ? k.hub : k.hostile));
+        final width = 2.2 + k.stroke / 2;
+        final ring = Path()..addOval(rect);
+        canvas.drawPath(
+          besieged ? _dashed(ring, 4, 3) : ring,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = width
+            ..color = (besieged ? k.hostile : k.dim).withValues(alpha: besieged ? la(0.75) : la(0.22)),
+        );
+        canvas.drawArc(
+          rect,
+          -math.pi / 2,
+          2 * math.pi * v,
+          false,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = width
+            ..color = color,
+        );
+      }
+    }
+
     // Center glyphs + labels -----------------------------------------------
-    final showNames = zoom >= 15;
+    final labels = layers.has(MapLayer.labels);
+    final ground = layers.has(MapLayer.ground);
+    final odds = layers.has(MapLayer.odds) && zoom >= 14;
+    final showNames = labels && zoom >= 15;
     // Close in, each turf also shows what it mainly supplies per hour.
     final showYield = zoom >= 16;
     for (final (c, t) in glyphs) {
       final color = t.isPlayer ? (t.isHub ? k.hub : k.mine) : k.hostile;
       final gr = t.isHub ? 6.5 : 4.5;
-      final glyph = _hexGlyph(c, gr);
-      canvas.drawPath(glyph, Paint()..color = k.ground);
+      final glyph = _hexGlyph(c, gr + (ground ? 1 : 0));
+      canvas.drawPath(glyph, Paint()..color = ground ? _groundInk(t, k) : k.ground);
       canvas.drawPath(
         glyph,
         Paint()
@@ -500,15 +604,30 @@ class _TurfPainter extends CustomPainter {
           ..strokeWidth = 1.5 + k.stroke / 2
           ..color = color,
       );
-      if (t.isHub) canvas.drawCircle(c, 1.8, Paint()..color = color);
-      if (t.isPlayer && (showNames || (t.isHub && zoom >= 12.5))) {
+      if (t.isHub) canvas.drawCircle(c, 1.8, Paint()..color = ground ? k.ground : color);
+      if (t.isPlayer && (showNames || (labels && t.isHub && zoom >= 12.5))) {
         final label = t.isHub ? '${t.name} · H${t.hubLevel}' : t.name;
         final y = showYield ? ix.turfHourly[t.id] : null;
         _label(canvas, c + Offset(0, gr + 9), label.toUpperCase(), color, k.ground,
             sub: y == null ? null : _mainYield(t, y, k));
+      } else if (odds && t.isHostile) {
+        // Out of reach: the odds are still worth knowing, but dimmed.
+        final (o, inReach) = visible.odds(g, t);
+        _label(canvas, c + Offset(0, gr + 9), '${(o * 100).round()}%',
+            inReach ? _oddsInk(o, k) : k.dim.withValues(alpha: 0.8), k.ground);
       }
     }
   }
+
+  /// Fill of a turf's centre glyph on the ground-type layer: the colour of
+  /// the resource its ground pays.
+  Color _groundInk(Turf t, MapInk k) => switch (t.biome) {
+        Biome.commercial => k.hub,
+        Biome.industrial => k.ink,
+        Biome.municipal => k.intel,
+      };
+
+  Color _oddsInk(double o, MapInk k) => o >= 0.6 ? k.mine : (o >= 0.35 ? k.hub : k.hostile);
 
   /// What a turf is there for: the resource its ground type produces.
   (String, Color) _mainYield(Turf t, Resources y, MapInk k) => switch (t.biome) {
@@ -536,7 +655,15 @@ class _TurfPainter extends CustomPainter {
       textAlign: TextAlign.center,
       textDirection: TextDirection.ltr,
     )..layout();
-    tp.paint(canvas, at - Offset(tp.width / 2, tp.preferredLineHeight / 2));
+    final topLeft = at - Offset(tp.width / 2, tp.preferredLineHeight / 2);
+    // A plate under the text: names stay readable over rings, roads and
+    // basemap labels.
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+          Rect.fromLTWH(topLeft.dx - 3, topLeft.dy - 1, tp.width + 6, tp.height + 2), const Radius.circular(2)),
+      Paint()..color = halo.withValues(alpha: 0.72),
+    );
+    tp.paint(canvas, topLeft);
   }
 
   @override
@@ -581,21 +708,24 @@ class _FxPainter extends CustomPainter {
     final halo = Paint()
       ..color = k.hub.withValues(alpha: 0.5)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
-    for (final s in ix.hubs.values) {
-      final target = s.hub.relayTarget == null ? null : ix.hubs[s.hub.relayTarget];
-      if (target == null) continue;
-      final a = cam.latLngToScreenOffset(LatLng(s.hub.lat, s.hub.lng));
-      final b = cam.latLngToScreenOffset(LatLng(target.hub.lat, target.hub.lng));
-      for (var i = 0; i < 3; i++) {
-        final f = (t + i / 3) % 1.0;
-        final p = Offset.lerp(a, b, f)!;
-        canvas.drawCircle(p, 5, halo);
-        canvas.drawCircle(p, 2.2, packet);
+    final layers = g.layers;
+    for (final s in layers.has(MapLayer.relays) ? ix.hubs.values : const <HubStats>[]) {
+      for (final id in w.relayLinks(s.hub)) {
+        final target = ix.hubs[id];
+        if (target == null) continue;
+        final a = cam.latLngToScreenOffset(LatLng(s.hub.lat, s.hub.lng));
+        final b = cam.latLngToScreenOffset(LatLng(target.hub.lat, target.hub.lng));
+        for (var i = 0; i < 3; i++) {
+          final f = (t + i / 3) % 1.0;
+          final p = Offset.lerp(a, b, f)!;
+          canvas.drawCircle(p, 5, halo);
+          canvas.drawCircle(p, 2.2, packet);
+        }
       }
     }
 
     // Events.
-    for (final e in w.events) {
+    for (final e in layers.has(MapLayer.events) ? w.events : const <WorldEvent>[]) {
       Offset? c;
       if (e.lat != null && e.lng != null) {
         c = cam.latLngToScreenOffset(LatLng(e.lat!, e.lng!));

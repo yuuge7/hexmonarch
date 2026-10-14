@@ -15,6 +15,8 @@ enum StreetPerk {
       credits: 500, creditGrowth: 1.6, intel: 40, intelGrowth: 1.45),
   muscle('muscle', 'Muscle', '+8% strike when breaching, +4% defense on every turf.',
       credits: 200, creditGrowth: 1.45, intel: 10, intelGrowth: 1.35),
+  recon('recon', 'Recon', 'Scout before you strike: rival turfs defend 5% weaker per rank.',
+      credits: 250, creditGrowth: 1.5, intel: 20, intelGrowth: 1.45, maxRank: 10),
   bench('bench', 'Deep Bench', '+10 maximum energy for jobs.',
       credits: 150, creditGrowth: 1.5, intel: 10, intelGrowth: 1.4),
   wind('wind', 'Second Wind', '+10% energy regeneration.',
@@ -92,6 +94,9 @@ class PerkEffects {
   double get relayMult => 1 + kRelayPerkStep * rank(StreetPerk.relay);
 
   double get strikeMult => 1 + 0.08 * rank(StreetPerk.muscle);
+
+  /// Multiplier on the defense of every rival turf you breach.
+  double get rivalDefMult => 1 - 0.05 * rank(StreetPerk.recon);
   double get defenseMult => 1 + 0.04 * rank(StreetPerk.muscle);
   double get energyMax => kBaseEnergyMax + 10 * rank(StreetPerk.bench);
   double get energyPerHour => kBaseEnergyPerHour * (1 + 0.10 * rank(StreetPerk.wind));
@@ -109,6 +114,7 @@ class PerkEffects {
       StreetPerk.spacing => '${fx.spacingM.round()} m apart',
       StreetPerk.relay => 'x${fx.relayMult.toStringAsFixed(2)} range',
       StreetPerk.muscle => 'x${fx.strikeMult.toStringAsFixed(2)} strike',
+      StreetPerk.recon => '-${((1 - fx.rivalDefMult) * 100).round()}% rival defense',
       StreetPerk.bench => '${fx.energyMax.round()} energy',
       StreetPerk.wind => '${fx.energyPerHour.toStringAsFixed(1)}/h',
       StreetPerk.smarts => 'x${fx.xpMult.toStringAsFixed(2)} XP',

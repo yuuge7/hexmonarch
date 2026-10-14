@@ -104,12 +104,7 @@ void collapseTurf(World w, Turf t, int ts) {
     }
     w.modulesDirty = true;
   }
-  for (final other in w.turfs.values) {
-    if (other.relayTarget == t.id) {
-      other.relayTarget = null;
-      w.markTurf(other);
-    }
-  }
+  w.cutRelaysTo(t.id);
   w.deleteTurf(t.id);
 }
 
@@ -121,12 +116,7 @@ void captureTurf(World w, Turf t, Faction f, int ts) {
   t.integrity = 60;
   t.lastTick = ts;
   w.markTurf(t);
-  for (final other in w.turfs.values) {
-    if (other.relayTarget == t.id) {
-      other.relayTarget = null;
-      w.markTurf(other);
-    }
-  }
+  w.cutRelaysTo(t.id);
 }
 
 // ------------------------------------------------------------ simulator
@@ -198,11 +188,14 @@ class Simulator {
       } else if (repair > 0 && t.integrity < floor) {
         t.integrity = math.min(floor, t.integrity + repair * dtH);
       }
-      if (before < 100 && t.integrity >= 100) w.liftSiege(t.id);
+      // Whole again: the siege is over (also clears one left on a turf
+      // that was already whole when the tick began).
+      if (t.integrity >= 100) w.liftSiege(t.id);
       if (before.floor() != t.integrity.floor()) w.markTurf(t);
     }
 
     if (_expireEvents(b, r)) structural = true;
+    if (w.expireBoosts(b)) structural = true;
     if (structural) w.reindex();
   }
 
@@ -221,11 +214,12 @@ class Simulator {
     final hourIdx = ts ~/ kHour;
     final rng = Rng(seedOf([p.worldSeed, hourIdx, 0x70C]));
 
-    final day = ts ~/ kDay;
-    if (day > p.lastEventDay) {
-      p.lastEventDay = day;
-      EventDirector(w).rollDay(day, ts, rng, r);
-      _factionsExpand(ts, rng);
+    // The Event Deck deals in waves through the day, never at night.
+    final wave = eventWave(ts);
+    if (wave >= 0 && hourIdx > p.lastEventHour) {
+      p.lastEventHour = hourIdx;
+      EventDirector(w).rollWave(ts, rng, r, morning: wave == 0);
+      if (wave == 0) _factionsExpand(ts, rng);
     }
 
     if (w.index.owned == 0) return;
@@ -234,8 +228,9 @@ class Simulator {
     p.heat += kHeatBase + kHeatSecured * w.index.suppliedRatio;
 
     var structural = false;
-    for (final f in w.factions) {
-      if (!rng.chance(raidChancePerHour(f.aggression, p.heat))) continue;
+    // A Ceasefire bought in the shop keeps every crew home.
+    for (final f in w.boosted(kBoostCeasefire) ? const <Faction>[] : w.factions) {
+      if (!rng.chance(raidChancePerHour(f.aggression, p.heat) * factionProfile(f.archetype).raids)) continue;
       final target = w.index.pickRaidTarget(rng.nextDouble());
       if (target == null) break;
       final t = w.turfs[target];
@@ -418,36 +413,46 @@ class Simulator {
 
 // ------------------------------------------------------------ event deck
 
-/// Local AI Director. Once per in-game day it deals 2-4 cards.
+/// Local AI Director. Deals cards in waves at the hours in [kEventWaveHours]
+/// (local time): 2-3 in the morning wave, which alone can bring lockdowns,
+/// offensives and market swings, then 1-2 opportunities in each later wave.
 class EventDirector {
   EventDirector(this.w);
   final World w;
 
   HexGrid get grid => w.grid;
 
-  void rollDay(int day, int ts, Rng rng, SimReport r) {
+  int _active(EventType t) => w.events.where((e) => e.type == t).length;
+
+  void rollWave(int ts, Rng rng, SimReport r, {required bool morning}) {
     final players = w.playerTurfs.toList();
     if (players.isEmpty) return;
     final hubs = players.where((t) => t.isHub).toList();
-    final count = 2 + rng.nextInt(3);
+    final count = morning ? 2 + rng.nextInt(2) : 1 + rng.nextInt(2);
 
     final weights = <EventType, double>{
-      EventType.surge: 2,
-      EventType.market: 1.5,
-      EventType.deadDrop: 2,
+      EventType.surge: morning ? 2 : 1,
+      EventType.deadDrop: morning ? 2 : 2.5,
       if (hubs.isNotEmpty) EventType.convoy: 3,
-      if (players.length >= kLockdownMinTurfs &&
-          w.events.where((e) => e.type == EventType.lockdown).length <
-              maxLockdowns({for (final t in players) t.district}.length))
+      if (morning) EventType.market: 1.5,
+      if (morning &&
+          players.length >= kLockdownMinTurfs &&
+          _active(EventType.lockdown) < maxLockdowns({for (final t in players) t.district}.length))
         EventType.lockdown: 2,
-      if (hubs.isNotEmpty &&
+      if (morning &&
+          hubs.isNotEmpty &&
           w.player.level >= kOffensiveMinLevel &&
           !w.events.any((e) => e.type == EventType.offensive))
         EventType.offensive: 0.8 + 0.5 * w.player.heat,
     };
-    if (w.events.any((e) => e.type == EventType.surge)) weights.remove(EventType.surge);
-    if (w.events.any((e) => e.type == EventType.market)) weights.remove(EventType.market);
+    void trim() {
+      if (_active(EventType.surge) > 0) weights.remove(EventType.surge);
+      if (_active(EventType.market) > 0) weights.remove(EventType.market);
+      if (_active(EventType.convoy) >= kMaxConvoys) weights.remove(EventType.convoy);
+      if (_active(EventType.deadDrop) >= kMaxDrops) weights.remove(EventType.deadDrop);
+    }
 
+    trim();
     for (var i = 0; i < count && weights.isNotEmpty; i++) {
       final type = rng.weighted(weights);
       final ok = switch (type) {
@@ -460,6 +465,7 @@ class EventDirector {
       };
       if (ok) r.eventsRolled++;
       if (type != EventType.convoy && type != EventType.deadDrop) weights.remove(type);
+      trim();
     }
     w.reindex();
   }
@@ -486,7 +492,7 @@ class EventDirector {
       id: _id(rng, EventType.lockdown),
       type: EventType.lockdown,
       target: t.id,
-      expiresAt: ts + 7 * kDay,
+      expiresAt: ts + kLockdownMs,
       payload: {'created': ts, 'district': t.district, 'near': t.name},
     ));
     w.log(ts, 'event', '${lockdownCopy(w.player.level).title}: the district around ${t.name} is frozen',
@@ -502,7 +508,7 @@ class EventDirector {
       id: _id(rng, EventType.convoy),
       type: EventType.convoy,
       target: grid.cellAt(p.latitude, p.longitude, kTurfKeyRes),
-      expiresAt: ts + 4 * kHour,
+      expiresAt: ts + kConvoyWindowMs,
       payload: {
         'created': ts,
         'lat': p.latitude,
@@ -512,7 +518,7 @@ class EventDirector {
         'credits': reward,
       },
     ));
-    w.log(ts, 'event', '${convoyCopy(w.player.level).title} spotted near ${hub.name} · 4h window',
+    w.log(ts, 'event', '${convoyCopy(w.player.level).title} spotted near ${hub.name} · ${kConvoyWindowMs ~/ kHour}h window',
         alert: 'Convoy spotted');
     return true;
   }
@@ -533,7 +539,7 @@ class EventDirector {
       id: _id(rng, EventType.deadDrop),
       type: EventType.deadDrop,
       target: grid.cellAt(spot.latitude, spot.longitude, kTurfKeyRes),
-      expiresAt: ts + kDay,
+      expiresAt: ts + kDropWindowMs,
       payload: {
         'created': ts,
         'lat': spot.latitude,
@@ -556,7 +562,7 @@ class EventDirector {
       id: _id(rng, EventType.surge),
       type: EventType.surge,
       target: target,
-      expiresAt: ts + 12 * kHour,
+      expiresAt: ts + kSurgeWindowMs,
       payload: {'created': ts, 'biome': biome.key},
     ));
     w.log(ts, 'gain', '${surgeTitle(biome)}: ${biome.label} output x2 for 12h');
@@ -569,7 +575,7 @@ class EventDirector {
       id: _id(rng, EventType.market),
       type: EventType.market,
       target: rng.pick(players).id,
-      expiresAt: ts + kDay,
+      expiresAt: ts + kMarketWindowMs,
       payload: {'created': ts, 'mult': boom ? 1.5 : 0.6, 'boom': boom},
     ));
     w.log(ts, boom ? 'gain' : 'loss',
@@ -587,11 +593,11 @@ class EventDirector {
       id: _id(rng, EventType.offensive),
       type: EventType.offensive,
       target: hub.id,
-      expiresAt: ts + 10 * kHour,
+      expiresAt: ts + kOffensiveWindowMs,
       payload: {'created': ts, 'faction': f.id, 'fortified': false},
     ));
     final msg = '${offensiveCopy(w.player.level).title}: ${factionName(f, w.player.level)} '
-        'massing on ${hub.name} · 10h';
+        'massing on ${hub.name} · ${kOffensiveWindowMs ~/ kHour}h';
     w.log(ts, 'loss', msg, alert: 'Offensive incoming');
     r.headline(msg);
     return true;

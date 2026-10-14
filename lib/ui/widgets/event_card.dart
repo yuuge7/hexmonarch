@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/format.dart';
 import '../../core/theme.dart';
+import '../../domain/balance.dart';
 import '../../domain/models.dart';
 import '../../domain/tiers.dart';
 import '../../game/game_controller.dart';
@@ -22,8 +23,14 @@ EventView describeEvent(GameController g, WorldEvent e) {
   switch (e.type) {
     case EventType.lockdown:
       final c = lockdownCopy(lvl);
-      return EventView(c.title, 'Income frozen in the district around ${e.payload['near'] ?? 'your turf'}. Go there in person.',
-          c.action, Palette.hostile, Icons.gpp_bad_outlined);
+      final inside = g.actions.inDistrict(e, g.lat, g.lng);
+      return EventView(
+          c.title,
+          'Income frozen in the district around ${e.payload['near'] ?? 'your turf'}. Lifts by itself when the timer runs out. '
+          '${inside ? 'You are in the district: full price.' : 'Pay it off from anywhere for x$kLockdownRemoteMult, or for less inside the district.'}',
+          c.action,
+          Palette.hostile,
+          Icons.gpp_bad_outlined);
     case EventType.convoy:
       final c = convoyCopy(lvl);
       final bp = e.payload['blueprints'];
@@ -116,7 +123,14 @@ class EventCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
+          // Time left of the card's whole window.
+          Meter(
+            value: (event.expiresAt - game.now) / (event.expiresAt - event.createdAt).clamp(1, 1 << 62),
+            color: v.color,
+            height: 2,
+          ),
+          const SizedBox(height: 6),
           Text(v.detail, style: TextStyles.bodyDim),
           if (via != null) ...[
             const SizedBox(height: 4),

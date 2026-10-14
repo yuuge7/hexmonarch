@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import '../core/format.dart';
 import '../core/theme.dart';
 import '../domain/balance.dart';
+import '../domain/shop.dart';
 import '../domain/tiers.dart';
 import '../game/game_controller.dart';
 import 'widgets/common.dart';
+import 'widgets/intel.dart';
 
 /// Read-only status strip over the map. Nothing here is tappable: every
 /// control lives in the bottom console.
@@ -22,6 +24,7 @@ class Hud extends StatelessWidget {
           final p = game.player;
           final rate = game.index.hourly;
           final need = xpToNext(p.level);
+          final boosts = game.world.boosts;
           return Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
             child: DecoratedBox(
@@ -56,6 +59,22 @@ class Hud extends StatelessWidget {
                         Text('${fmtNum(p.xp)}/${fmtNum(need)}', style: TextStyles.label),
                       ],
                     ),
+                    // Shop boosts running now, with their time left.
+                    if (boosts.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Wrap(
+                          spacing: 5,
+                          runSpacing: 4,
+                          children: [
+                            for (final item in ShopItem.values)
+                              if (boosts[item.key] case final until?)
+                                BoostTag(title: item.title, leftMs: until - game.now),
+                          ],
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),

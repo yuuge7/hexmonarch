@@ -36,26 +36,75 @@ String tierBadge(int level) {
   return e > 1 ? 'T${t.index1} · EPOCH ${roman(e)}' : 'T${t.index1}';
 }
 
+// Six factions per tier, by archetype (see kFactionProfiles in balance.dart):
+// the original three, then the weak Corner Boys, the Scrappers and the tough
+// Old Firm.
 const _factionNames = {
-  Tier.grounded: ['Southside Vipers', 'Iron Row Loan Sharks', 'City Hall Ring'],
-  Tier.syndicate: ['Blackwater Kinetic', 'Helix Dynamics Intel', 'Obsidian Holdings'],
-  Tier.escalation: ['AEGIS Defense Grid', 'Project Chimera', 'NULL//SIGNAL'],
+  Tier.grounded: [
+    'Southside Vipers',
+    'Iron Row Loan Sharks',
+    'City Hall Ring',
+    'Eastgate Corner Boys',
+    'Railyard Scrappers',
+    'The Old Firm',
+  ],
+  Tier.syndicate: [
+    'Blackwater Kinetic',
+    'Helix Dynamics Intel',
+    'Obsidian Holdings',
+    'Gigline Couriers',
+    'Salvage Unlimited',
+    'Kronos Private Equity',
+  ],
+  Tier.escalation: [
+    'AEGIS Defense Grid',
+    'Project Chimera',
+    'NULL//SIGNAL',
+    'Feral Drone Swarm',
+    'Rogue Service Bots',
+    'OMEGA Directive',
+  ],
 };
 
 const _factionKinds = {
-  Tier.grounded: ['rival crew', 'loan sharks', 'corrupt officials'],
-  Tier.syndicate: ['mercenary company', 'corporate spies', 'shell conglomerate'],
-  Tier.escalation: ['autonomous defense grid', 'experimental tech cell', 'black-ops AI'],
+  Tier.grounded: [
+    'rival crew',
+    'loan sharks',
+    'corrupt officials',
+    'corner boys, easy pickings',
+    'scrap thieves',
+    'old-school mob, tough but rich',
+  ],
+  Tier.syndicate: [
+    'mercenary company',
+    'corporate spies',
+    'shell conglomerate',
+    'courier gang, easy pickings',
+    'salvage contractors',
+    'private equity, tough but rich',
+  ],
+  Tier.escalation: [
+    'autonomous defense grid',
+    'experimental tech cell',
+    'black-ops AI',
+    'feral drones, easy pickings',
+    'rogue service bots',
+    'doomsday AI, tough but rich',
+  ],
 };
 
 String factionName(Faction f, int level) {
-  final base = _factionNames[tierFor(level)]![f.archetype % 3];
+  final names = _factionNames[tierFor(level)]!;
+  final base = names[f.archetype % names.length];
   final ep = epochFor(level);
   final mk = f.nemesisRank + ep;
   return mk > 1 ? '$base Mk.${roman(mk)}' : base;
 }
 
-String factionKind(Faction f, int level) => _factionKinds[tierFor(level)]![f.archetype % 3];
+String factionKind(Faction f, int level) {
+  final kinds = _factionKinds[tierFor(level)]!;
+  return kinds[f.archetype % kinds.length];
+}
 
 /// Base module designs per tier: (name, cash bias, defense bias, favored perk).
 class ModuleBase {

@@ -10,6 +10,7 @@ import '../../game/game_controller.dart';
 import '../../platform/location_service.dart';
 import '../guide_screen.dart';
 import '../widgets/common.dart';
+import '../widgets/intel.dart';
 
 class NetworkPanel extends StatelessWidget {
   const NetworkPanel({super.key, required this.game, required this.onLocate, required this.onTurfList});
@@ -122,6 +123,8 @@ class NetworkPanel extends StatelessWidget {
               const SizedBox(height: 10),
             ],
             const SizedBox(height: 6),
+            _Rivals(game: game),
+            const SizedBox(height: 16),
             const Eyebrow('Field ops'),
             const SizedBox(height: 8),
             _Toggle(
@@ -297,6 +300,70 @@ class _SupplyBreakdown extends StatelessWidget {
   }
 }
 
+/// Who you are up against: every faction, how hard it fights, and how the
+/// fight has gone.
+class _Rivals extends StatelessWidget {
+  const _Rivals({required this.game});
+  final GameController game;
+
+  @override
+  Widget build(BuildContext context) {
+    final lvl = game.player.level;
+    final factions = List.of(game.world.factions)..sort((a, b) => a.archetype.compareTo(b.archetype));
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Eyebrow('Rival crews · ${factions.length}', color: Palette.hostile),
+        const SizedBox(height: 6),
+        Panel(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+          child: Column(
+            children: [
+              for (final f in factions) ...[
+                if (f != factions.first) const Divider(height: 1, color: Palette.line),
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(factionName(f, lvl),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyles.title.copyWith(fontSize: 14, color: Palette.hostile)),
+                          ),
+                          StrengthChip(factionProfile(f.archetype).grit),
+                        ],
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        [
+                          factionKind(f, lvl),
+                          'won ${f.wins}, lost ${f.losses} against you',
+                          if (factionProfile(f.archetype).raids < 1) 'raids less often',
+                          if (f.nemesisRank > 0) 'nemesis rank ${f.nemesisRank}',
+                        ].join(' · '),
+                        style: TextStyles.bodyDim.copyWith(fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Every 25 raids a faction wins against you add a nemesis rank: +10% strength. Failed breaches do not count.',
+          style: TextStyles.bodyDim.copyWith(fontSize: 12),
+        ),
+      ],
+    );
+  }
+}
+
 class _HubRow extends StatelessWidget {
   const _HubRow({required this.game, required this.id, required this.onLocate});
   final GameController game;
@@ -307,7 +374,7 @@ class _HubRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final h = game.world.turfs[id]!;
     final s = game.index.hubs[id]!;
-    final target = h.relayTarget == null ? null : game.world.turfs[h.relayTarget];
+    final links = game.world.relayLinks(h);
     return InkWell(
       onTap: () => onLocate(h.lat, h.lng, id),
       child: Padding(
@@ -321,7 +388,9 @@ class _HubRow extends StatelessWidget {
                   maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyles.body.copyWith(color: Palette.text)),
             ),
             Text(
-              target == null ? fmtKm(s.radiusKm) : '${fmtKm(s.radiusKm)} → ${target.name}',
+              links.isEmpty
+                  ? fmtKm(s.radiusKm)
+                  : '${fmtKm(s.radiusKm)} → ${links.length == 1 ? (game.world.turfs[links.first]?.name ?? '?') : '${links.length} hubs'}',
               style: TextStyles.dataSmall,
             ),
             const SizedBox(width: 4),

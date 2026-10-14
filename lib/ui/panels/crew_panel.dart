@@ -7,20 +7,22 @@ import '../../domain/perks.dart';
 import '../../game/game_controller.dart';
 import '../widgets/common.dart';
 import 'arsenal_panel.dart';
+import 'shop_panel.dart';
 import 'trade_panel.dart';
 
 enum CrewSection {
   jobs('Jobs'),
   perks('Perks'),
   modules('Modules'),
+  shop('Shop'),
   trade('Trade');
 
   const CrewSection(this.label);
   final String label;
 }
 
-/// Jobs (energy), street perks (credits + intel), the module stash and the
-/// exchange.
+/// Jobs (energy), street perks (credits + intel), the module stash, the shop
+/// and the exchange.
 class CrewPanel extends StatefulWidget {
   const CrewPanel({super.key, required this.game});
   final GameController game;
@@ -55,6 +57,7 @@ class _CrewPanelState extends State<CrewPanel> {
             CrewSection.jobs => _Jobs(game: game),
             CrewSection.perks => _Perks(game: game),
             CrewSection.modules => ArsenalPanel(game: game),
+            CrewSection.shop => ShopPanel(game: game),
             CrewSection.trade => TradePanel(game: game),
           },
         ),
